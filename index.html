@@ -33,6 +33,7 @@
         ::-webkit-scrollbar-track { background: #1e293b; }
         ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
         .video-container { position: relative; overflow: hidden; background: #000; display: flex; justify-content: center; align-items: center; }
+        /* Global video style */
         video { width: 100%; height: 100%; object-fit: contain; }
     </style>
 </head>
@@ -50,8 +51,7 @@
             },
             { 
                 name: "Rory McIlroy (Driver)", 
-                // Short clip for faster scanning
-                url: "https://res.cloudinary.com/dtwgigsce/video/upload/v1764641979/golf_swing_analysis/Rory_McIlroy_Driver_Swing_Explained_f6imdk.mp4"
+                url: "https://res.cloudinary.com/dtwgigsce/video/upload/v1764641979/golf_swing_analysis/Rory_McIlroys_Iron_Swing_The_Perfect_Blend_of_Power_Precision_Rory_McIlroy_isnt_just_one_ehae6o.mp4"
             }
         ];
 
@@ -101,7 +101,11 @@
             Camera: () => <LucideIcon name="Camera" />,
             Record: () => <LucideIcon name="Disc" />,
             Stop: () => <LucideIcon name="Square" />,
-            Wand: () => <LucideIcon name="Wand2" />
+            Wand: () => <LucideIcon name="Wand2" />,
+            Target: () => <LucideIcon name="Target" />,
+            Trash: () => <LucideIcon name="Trash2" />,
+            Eye: () => <LucideIcon name="Eye" />,
+            Sliders: () => <LucideIcon name="Sliders" />
         };
 
         // --- Video Analyzer Component ---
@@ -213,7 +217,6 @@
                                 if (poses.length > 0) {
                                     const rawKeypoints = poses[0].keypoints;
                                     
-                                    // Send pose data up to parent for Auto-Sync logic
                                     if(onPoseDetected) {
                                         onPoseDetected(rawKeypoints, video.currentTime);
                                     }
@@ -228,10 +231,8 @@
                                         posesRef.current[id] = screenKeypoints;
                                     }
 
-                                    // Draw My Skeleton
                                     drawSkeleton(ctx, screenKeypoints, id === 'v2' ? '#a855f7' : '#00ffcc', 1.0);
 
-                                    // Draw Ghost
                                     if (ghostMode && posesRef) {
                                         const otherId = id === 'v1' ? 'v2' : 'v1';
                                         const otherPose = posesRef.current[otherId];
@@ -385,6 +386,13 @@
                 onSeek(percent * duration);
             };
 
+            // Mobile: Cycle through speeds instead of showing all buttons
+            const cycleSpeed = () => {
+                const rates = [0.25, 0.5, 1.0, 1.5, 2.0];
+                const nextIdx = (rates.indexOf(playbackRate) + 1) % rates.length;
+                onRateChange(rates[nextIdx]);
+            };
+
             return (
                 <div className="flex items-center gap-2 md:gap-4 bg-slate-900 border-t border-slate-700 p-2 h-14 md:h-20 w-full shrink-0">
                     <button 
@@ -413,6 +421,7 @@
                         </div>
                     </div>
 
+                    {/* Desktop: Full List */}
                     <div className="hidden md:flex gap-1 bg-slate-800 p-1 rounded flex-shrink-0">
                         {[0.25, 0.5, 1.0, 1.5, 2.0].map(rate => (
                             <button 
@@ -424,11 +433,348 @@
                             </button>
                         ))}
                     </div>
+
+                    {/* Mobile: Compact Cycler */}
+                    <button 
+                        onClick={cycleSpeed}
+                        className="md:hidden w-8 h-8 flex items-center justify-center bg-slate-800 rounded text-[10px] font-bold text-slate-300 active:bg-slate-700 flex-shrink-0"
+                    >
+                        {playbackRate}x
+                    </button>
                 </div>
             );
         };
 
+        // --- NEW: Ball Tracker Component (Robust Raw JS Logic) ---
+        const BallTracker = () => {
+            const [videoSrc, setVideoSrc] = useState(null);
+            const [isTracking, setIsTracking] = useState(false);
+            const [initialPos, setInitialPos] = useState(null);
+            const [sensitivity, setSensitivity] = useState(40); // User adjustable
+            const [showMask, setShowMask] = useState(false);
+            
+            // WE USE REFS for high-performance loops to avoid React render lag
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null); // Overlay canvas
+            const memCanvasRef = useRef(document.createElement('canvas')); // Offscreen
+            const prevFrameRef = useRef(null);
+            const ballPathRef = useRef([]); // Mutable path for 60fps drawing
+            const lastPosRef = useRef(null);
+            const trackerState = useRef({ isFlying: false });
+
+            const handleUpload = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const url = URL.createObjectURL(file);
+                    setVideoSrc(url);
+                    setInitialPos(null);
+                    ballPathRef.current = [];
+                    prevFrameRef.current = null;
+                    trackerState.current = { isFlying: false };
+                    setIsTracking(false);
+                }
+            };
+
+            const handleVideoClick = (e) => {
+                if(isTracking || !videoRef.current) return;
+                const rect = e.currentTarget.getBoundingClientRect(); 
+                const scaleX = videoRef.current.videoWidth / rect.width;
+                const scaleY = videoRef.current.videoHeight / rect.height;
+                const x = (e.clientX - rect.left) * scaleX;
+                const y = (e.clientY - rect.top) * scaleY;
+                
+                setInitialPos({x, y});
+                lastPosRef.current = {x, y};
+                ballPathRef.current = [{x, y}];
+                // Force redraw to show target
+                requestAnimationFrame(drawOverlay);
+            };
+
+            const startTracking = () => {
+                if(!videoRef.current || !initialPos) return;
+                setIsTracking(true);
+                ballPathRef.current = [initialPos]; 
+                lastPosRef.current = initialPos;
+                prevFrameRef.current = null;
+                trackerState.current = { isFlying: false };
+                
+                const vid = videoRef.current;
+                vid.currentTime = 0;
+                vid.playbackRate = 0.5; // Slow mo helps detection
+                vid.play();
+                
+                requestAnimationFrame(trackLoop);
+            };
+
+            const trackLoop = () => {
+                const vid = videoRef.current;
+                if (!vid || vid.paused || vid.ended) {
+                    if(vid?.ended) setIsTracking(false);
+                    return;
+                }
+
+                const width = vid.videoWidth;
+                const height = vid.videoHeight;
+                const memCan = memCanvasRef.current;
+                
+                if (memCan.width !== width) {
+                    memCan.width = width;
+                    memCan.height = height;
+                }
+                const memCtx = memCan.getContext('2d', { willReadFrequently: true });
+
+                // 2. Get Current Frame Data
+                memCtx.drawImage(vid, 0, 0, width, height);
+                const frameData = memCtx.getImageData(0, 0, width, height);
+                const data = frameData.data; // R, G, B, A linear array
+
+                // 3. Computer Vision Logic (Frame Difference)
+                if (prevFrameRef.current) {
+                    const prev = prevFrameRef.current;
+                    let sumX = 0, sumY = 0, count = 0;
+                    
+                    // SMART ROI: Scan specific box around last known position
+                    const last = lastPosRef.current;
+                    const roi = trackerState.current.isFlying ? 150 : 40; // Small ROI before launch
+                    const startX = Math.max(0, Math.floor(last.x - roi));
+                    const endX = Math.min(width, Math.floor(last.x + roi));
+                    const startY = Math.max(0, Math.floor(last.y - roi));
+                    const endY = Math.min(height, Math.floor(last.y + roi));
+
+                    for (let y = startY; y < endY; y += 2) { 
+                        for (let x = startX; x < endX; x += 2) {
+                            const i = (y * width + x) * 4;
+                            
+                            // 1. Brightness Check (Golf ball is white/bright)
+                            // Relaxed slightly to catch slightly shadowed balls
+                            if (data[i] < 180 || data[i+1] < 180 || data[i+2] < 180) continue;
+
+                            // 2. Motion Check (Diff from previous frame)
+                            const rDiff = Math.abs(data[i] - prev[i]);
+                            const gDiff = Math.abs(data[i+1] - prev[i+1]);
+                            const bDiff = Math.abs(data[i+2] - prev[i+2]);
+                            
+                            // User sensitivity controls this threshold
+                            if (rDiff + gDiff + bDiff > sensitivity) {
+                                sumX += x;
+                                sumY += y;
+                                count++;
+                                
+                                // Debug Paint
+                                if (showMask) {
+                                    data[i] = 255; data[i+1] = 0; data[i+2] = 255; // Magenta for motion
+                                }
+                            }
+                        }
+                    }
+
+                    // 4. Update Position
+                    if (count > 3) { // Found a blob
+                        const newX = sumX / count;
+                        const newY = sumY / count;
+                        const dist = Math.hypot(newX - last.x, newY - last.y);
+                        
+                        if (!trackerState.current.isFlying) {
+                            // WAITING FOR LAUNCH
+                            // Needs sudden movement > 10px to trigger launch
+                            if (dist > 10) {
+                                trackerState.current.isFlying = true;
+                                const newPos = { x: newX, y: newY };
+                                ballPathRef.current.push(newPos);
+                                lastPosRef.current = newPos;
+                            }
+                        } else {
+                            // FLYING
+                            // Filter jitter (must move > 2px) but < roi (don't teleport)
+                            if (dist > 2 && dist < roi) {
+                                const newPos = { x: newX, y: newY };
+                                ballPathRef.current.push(newPos);
+                                lastPosRef.current = newPos;
+                            }
+                        }
+                    }
+                    
+                    // Show Debug Mask on Screen if enabled
+                    if (showMask) {
+                        memCtx.putImageData(frameData, 0, 0);
+                        const canvas = canvasRef.current;
+                        const ctx = canvas.getContext('2d');
+                        ctx.clearRect(0,0, canvas.width, canvas.height);
+                        ctx.globalAlpha = 0.7;
+                        // Draw resized mask
+                        ctx.drawImage(memCan, 0, 0, canvas.width, canvas.height);
+                        ctx.globalAlpha = 1.0;
+                    }
+                }
+
+                // 5. Store current frame
+                prevFrameRef.current = new Uint8ClampedArray(data);
+
+                // 6. Draw Overlay
+                if(!showMask) drawOverlay();
+
+                if (isTracking) {
+                    requestAnimationFrame(trackLoop);
+                }
+            };
+
+            const drawOverlay = () => {
+                const canvas = canvasRef.current;
+                const vid = videoRef.current;
+                if (!canvas || !vid) return;
+
+                const rect = vid.getBoundingClientRect();
+                if (canvas.width !== rect.width || canvas.height !== rect.height) {
+                    canvas.width = rect.width;
+                    canvas.height = rect.height;
+                }
+
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                const sx = canvas.width / vid.videoWidth;
+                const sy = canvas.height / vid.videoHeight;
+
+                // Draw Target
+                if (initialPos && !isTracking) {
+                    const tx = initialPos.x * sx;
+                    const ty = initialPos.y * sy;
+                    
+                    ctx.strokeStyle = '#22c55e';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(tx, ty, 15, 0, 2*Math.PI);
+                    ctx.moveTo(tx-20, ty); ctx.lineTo(tx+20, ty);
+                    ctx.moveTo(tx, ty-20); ctx.lineTo(tx, ty+20);
+                    ctx.stroke();
+                }
+
+                // Draw Path
+                const path = ballPathRef.current;
+                if (path.length > 1) {
+                    // Shadow
+                    ctx.beginPath();
+                    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+                    ctx.lineWidth = 8;
+                    ctx.lineCap = 'round';
+                    drawPath(ctx, path, sx, sy);
+                    ctx.stroke();
+
+                    // Line
+                    ctx.beginPath();
+                    ctx.strokeStyle = '#dc2626';
+                    ctx.lineWidth = 4;
+                    ctx.lineCap = 'round';
+                    drawPath(ctx, path, sx, sy);
+                    ctx.stroke();
+                }
+            };
+
+            const drawPath = (ctx, path, sx, sy) => {
+                ctx.moveTo(path[0].x * sx, path[0].y * sy);
+                for (let i = 1; i < path.length; i++) {
+                    ctx.lineTo(path[i].x * sx, path[i].y * sy);
+                }
+            };
+
+            return (
+                <div className="flex flex-col h-full bg-slate-900">
+                    <div className="flex-1 relative flex items-center justify-center bg-black overflow-hidden group cursor-crosshair p-4 md:p-6">
+                        {!videoSrc && (
+                            <div className="text-center text-slate-500">
+                                <Icons.Target size={48} className="mx-auto mb-2 opacity-50"/>
+                                <p>Upload a shot to start</p>
+                            </div>
+                        )}
+                        {videoSrc && (
+                            <div className="relative inline-flex justify-center items-center" style={{ maxWidth: '100%', maxHeight: '100%' }}>
+                                <video 
+                                    ref={videoRef}
+                                    src={videoSrc}
+                                    className="block w-auto h-screen pointer-events-none" 
+                                    style={{maxWidth: '100%', maxHeight: '100%', objectFit: 'contain'}} 
+                                    controls={false}
+                                    playsInline
+                                    muted 
+                                    onEnded={() => setIsTracking(false)}
+                                />
+                                <div 
+                                    className="absolute inset-0 z-20"
+                                    onClick={handleVideoClick}
+                                >
+                                    <canvas ref={canvasRef} className="w-full h-full pointer-events-none" />
+                                    {!initialPos && !isTracking && (
+                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                            <div className="bg-black/70 text-white px-4 py-2 rounded-full text-sm animate-bounce">
+                                                👆 Tap the ball to set start point
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    
+                    <div className="h-24 bg-slate-800 border-t border-slate-700 flex flex-col justify-center px-4 shrink-0 gap-2">
+                        <div className="flex items-center justify-between w-full">
+                            <label className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded cursor-pointer transition text-xs font-bold">
+                                <Icons.Upload size={16} />
+                                <span>Upload Shot</span>
+                                <input type="file" accept="video/*" className="hidden" onChange={handleUpload} />
+                            </label>
+
+                            {videoSrc && (
+                                <div className="flex gap-2 items-center">
+                                    {/* Sensitivity Slider */}
+                                    <div className="flex flex-col items-center mr-2">
+                                        <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                                            <Icons.Sliders size={10}/> Sens: {sensitivity}
+                                        </div>
+                                        <input 
+                                            type="range" min="10" max="100" step="5" 
+                                            value={sensitivity} 
+                                            onChange={(e) => setSensitivity(parseInt(e.target.value))}
+                                            className="w-20 h-1 bg-slate-600 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                    </div>
+
+                                    {/* Debug Toggle */}
+                                    <button 
+                                        onClick={() => setShowMask(!showMask)}
+                                        className={`p-2 rounded text-xs ${showMask ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-400'}`}
+                                        title="Show Debug Mask"
+                                    >
+                                        <Icons.Eye size={16} />
+                                    </button>
+                                    
+                                    <button 
+                                        onClick={() => { ballPathRef.current = []; setInitialPos(null); setIsTracking(false); if(videoRef.current) videoRef.current.pause(); }}
+                                        className="p-2 rounded bg-slate-700 hover:bg-slate-600 text-white"
+                                        title="Reset"
+                                    >
+                                        <Icons.Trash size={18} />
+                                    </button>
+                                    <button 
+                                        onClick={startTracking}
+                                        disabled={!initialPos || isTracking}
+                                        className={`px-6 py-2 rounded flex items-center gap-2 font-bold text-sm ${isTracking ? 'bg-red-900/50 text-red-200 animate-pulse' : (!initialPos ? 'bg-slate-600 text-slate-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700 text-white')}`}
+                                    >
+                                        {isTracking ? 'Tracking...' : 'Start Trace'}
+                                        <Icons.Activity size={16} />
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Main App Component ---
         const App = () => {
+            const [activeTab, setActiveTab] = useState('swing'); // 'swing' or 'ball'
+            const [menuOpen, setMenuOpen] = useState(false);
+
             const [mode, setMode] = useState('single'); 
             const [video1, setVideo1] = useState(null);
             const [video2, setVideo2] = useState(null);
@@ -436,14 +782,12 @@
             const [stats, setStats] = useState({ v1: {}, v2: {} });
             const [history, setHistory] = useState([]);
             
-            // New Features State
             const [ghostMode, setGhostMode] = useState(false);
             const [ghostScale, setGhostScale] = useState(1.0); 
             const [pathTrace, setPathTrace] = useState(false);
             const [modelType, setModelType] = useState('Lightning'); 
             const [selectedProVideo, setSelectedProVideo] = useState(PRO_LIBRARY[0].url);
             
-            // Export State
             const [isRecording, setIsRecording] = useState(false);
             const mediaRecorderRef = useRef(null);
             const recordedChunksRef = useRef([]);
@@ -455,9 +799,6 @@
 
             const posesRef = useRef({ v1: null, v2: null });
 
-            const [menuOpen, setMenuOpen] = useState(false);
-
-            // Independent Video States
             const [v1Playing, setV1Playing] = useState(false);
             const [v1Time, setV1Time] = useState(0);
             const [v1Duration, setV1Duration] = useState(1);
@@ -472,7 +813,7 @@
             
             const [isLinked, setIsLinked] = useState(true);
 
-            const handleUpload = (e, slot) => {
+            const handleUploadSwing = (e, slot) => {
                 const file = e.target.files[0];
                 if (file) {
                     const url = URL.createObjectURL(file);
@@ -515,10 +856,7 @@
             }, []);
 
             const updateStats = (id, newStats) => {
-                setStats(prev => ({
-                    ...prev,
-                    [id]: newStats
-                }));
+                setStats(prev => ({ ...prev, [id]: newStats }));
             };
 
             const toggleLinkedPlay = () => {
@@ -527,519 +865,299 @@
                 setV2Playing(newState);
             };
 
-            // --- AUTO-SYNC LOGIC ---
-            
+            // Auto Sync
             const startAutoSync = () => {
                 setIsAutoSyncing(true);
                 setSyncOffset(0);
-                
-                setV1Rate(1.5); // Reduced from 2.0x for better detection
+                setV1Rate(1.5);
                 setV2Rate(1.5);
-                
                 swingPeaks.current = { v1: { time: null, val: Infinity }, v2: { time: null, val: Infinity } };
-                
                 setV1Playing(true);
                 setV2Playing(true);
-                
-                setTimeout(() => {
-                    if (isAutoSyncing) {
-                        finalizeSync();
-                    }
-                }, 12000);
+                setTimeout(() => { if (isAutoSyncing) finalizeSync(); }, 12000);
             };
 
             const finalizeSync = () => {
                 if (!isAutoSyncing) return;
-
                 setIsAutoSyncing(false);
                 setV1Playing(false);
                 setV2Playing(false);
-                setV1Rate(0.5); // Normal speed
+                setV1Rate(0.5);
                 setV2Rate(0.5);
-                
                 const p1 = swingPeaks.current.v1;
                 const p2 = swingPeaks.current.v2;
-                
                 if (p1.time !== null && p2.time !== null) {
                     const offset = p1.time - p2.time;
-                    console.log("Auto-Sync Calculated Offset:", offset);
                     setSyncOffset(offset);
                     setV1Seek(p1.time);
                     setV2Seek(p2.time); 
-                } else {
-                    console.warn("Could not detect swings. Peaks:", p1, p2);
                 }
             };
 
-            // FIXED: Relaxed constraints for faster motion
             const handlePoseDetected = (id, keypoints, timestamp) => {
                 if (!isAutoSyncing) return;
-
                 const leftWrist = keypoints[9];
                 const rightWrist = keypoints[10];
-                
-                // Lower threshold to catch blurry fast frames
                 if ((leftWrist.score < 0.2 && rightWrist.score < 0.2)) return;
-
-                // Use robust wrist finding (one might be hidden)
                 let wristY;
-                if (leftWrist.score > 0.2 && rightWrist.score > 0.2) {
-                    wristY = (leftWrist.y + rightWrist.y) / 2;
-                } else if (leftWrist.score > 0.2) {
-                    wristY = leftWrist.y;
-                } else {
-                    wristY = rightWrist.y;
-                }
-                
-                // Removed the "nose check" because sometimes head dips or is misdetected
-                // Just looking for the absolute highest point (lowest Y) usually works well for backswing top
-
-                // Track Minimum Y (Highest Point of Swing)
-                if (wristY < swingPeaks.current[id].val) {
-                    swingPeaks.current[id] = { time: timestamp, val: wristY };
-                }
+                if (leftWrist.score > 0.2 && rightWrist.score > 0.2) wristY = (leftWrist.y + rightWrist.y) / 2;
+                else if (leftWrist.score > 0.2) wristY = leftWrist.y;
+                else wristY = rightWrist.y;
+                if (wristY < swingPeaks.current[id].val) swingPeaks.current[id] = { time: timestamp, val: wristY };
             };
 
             useEffect(() => {
                 if (!isAutoSyncing) return;
                 const v1Done = v1Time > 10 || v1Time >= v1Duration * 0.95;
                 const v2Done = v2Time > 10 || v2Time >= v2Duration * 0.95;
-
-                if (v1Done && v2Done) {
-                    finalizeSync();
-                }
+                if (v1Done && v2Done) finalizeSync();
             }, [v1Time, v2Time, v1Duration, v2Duration, isAutoSyncing]);
 
-
-            // --- EXPORT FUNCTIONALITY ---
-            
+            // Export logic (same as before)
             const drawCompositeFrame = (ctx, width, height) => {
                 ctx.fillStyle = '#0f172a';
                 ctx.fillRect(0, 0, width, height);
-
                 const halfWidth = width / 2;
-                
                 const vid1 = document.getElementById('video-v1');
                 const can1 = document.getElementById('canvas-v1');
-                
                 if (vid1) {
-                    const v1W = vid1.videoWidth;
-                    const v1H = vid1.videoHeight;
+                    const v1W = vid1.videoWidth; const v1H = vid1.videoHeight;
                     const targetW = mode === 'compare' ? halfWidth : width;
                     const targetH = height;
                     const targetRatio = targetW / targetH;
                     const v1Ratio = v1W / v1H;
-                    
                     let drawW, drawH, startX, startY;
-                    
-                    if (v1Ratio > targetRatio) {
-                        drawW = targetW;
-                        drawH = drawW / v1Ratio;
-                        startX = 0;
-                        startY = (targetH - drawH) / 2;
-                    } else {
-                        drawH = targetH;
-                        drawW = drawH * v1Ratio;
-                        startX = (targetW - drawW) / 2;
-                        startY = 0;
-                    }
-                    
+                    if (v1Ratio > targetRatio) { drawW = targetW; drawH = drawW / v1Ratio; startX = 0; startY = (targetH - drawH) / 2; } 
+                    else { drawH = targetH; drawW = drawH * v1Ratio; startX = (targetW - drawW) / 2; startY = 0; }
                     ctx.drawImage(vid1, 0, 0, v1W, v1H, startX, startY, drawW, drawH);
-                    if (can1) {
-                        ctx.drawImage(can1, 0, 0, can1.width, can1.height, startX, startY, drawW, drawH);
-                    }
+                    if (can1) ctx.drawImage(can1, 0, 0, can1.width, can1.height, startX, startY, drawW, drawH);
                 }
-
                 if (mode === 'compare') {
                     const vid2 = document.getElementById('video-v2');
                     const can2 = document.getElementById('canvas-v2');
                     if (vid2) {
-                        const v2W = vid2.videoWidth;
-                        const v2H = vid2.videoHeight;
-                        const targetW = halfWidth;
-                        const targetH = height;
-                        const targetRatio = targetW / targetH;
-                        const v2Ratio = v2W / v2H;
-                        
+                        const v2W = vid2.videoWidth; const v2H = vid2.videoHeight;
+                        const targetW = halfWidth; const targetH = height;
+                        const targetRatio = targetW / targetH; const v2Ratio = v2W / v2H;
                         let drawW, drawH, startX, startY;
-                        
-                        if (v2Ratio > targetRatio) {
-                            drawW = targetW;
-                            drawH = drawW / v2Ratio;
-                            startX = halfWidth;
-                            startY = (targetH - drawH) / 2;
-                        } else {
-                            drawH = targetH;
-                            drawW = drawH * v2Ratio;
-                            startX = halfWidth + (targetW - drawW) / 2;
-                            startY = 0;
-                        }
-                        
+                        if (v2Ratio > targetRatio) { drawW = targetW; drawH = drawW / v2Ratio; startX = halfWidth; startY = (targetH - drawH) / 2; } 
+                        else { drawH = targetH; drawW = drawH * v2Ratio; startX = halfWidth + (targetW - drawW) / 2; startY = 0; }
                         ctx.drawImage(vid2, 0, 0, v2W, v2H, startX, startY, drawW, drawH);
-                        if (can2) {
-                             ctx.drawImage(can2, 0, 0, can2.width, can2.height, startX, startY, drawW, drawH);
-                        }
+                        if (can2) ctx.drawImage(can2, 0, 0, can2.width, can2.height, startX, startY, drawW, drawH);
                     }
-                    
-                    ctx.strokeStyle = '#334155';
-                    ctx.lineWidth = 4;
-                    ctx.beginPath();
-                    ctx.moveTo(halfWidth, 0);
-                    ctx.lineTo(halfWidth, height);
-                    ctx.stroke();
+                    ctx.strokeStyle = '#334155'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(halfWidth, 0); ctx.lineTo(halfWidth, height); ctx.stroke();
                 }
-
-                ctx.font = '20px sans-serif';
-                ctx.fillStyle = 'white';
-                ctx.fillText('ProSwing AI Analysis', 20, 40);
-                
-                if (stats.v1.spineAngle) {
-                    ctx.font = '16px sans-serif';
-                    ctx.fillText(`Spine: ${stats.v1.spineAngle}°`, 20, height - 30);
-                }
+                ctx.font = '20px sans-serif'; ctx.fillStyle = 'white'; ctx.fillText('ProSwing AI Analysis', 20, 40);
+                if (stats.v1.spineAngle) { ctx.font = '16px sans-serif'; ctx.fillText(`Spine: ${stats.v1.spineAngle}°`, 20, height - 30); }
             };
 
             const handleSnapshot = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = 1920;
-                canvas.height = 1080;
-                const ctx = canvas.getContext('2d');
-                drawCompositeFrame(ctx, canvas.width, canvas.height);
-                const link = document.createElement('a');
-                link.download = `proswing-snapshot-${Date.now()}.png`;
-                link.href = canvas.toDataURL('image/png');
-                link.click();
+                const canvas = document.createElement('canvas'); canvas.width = 1920; canvas.height = 1080;
+                const ctx = canvas.getContext('2d'); drawCompositeFrame(ctx, canvas.width, canvas.height);
+                const link = document.createElement('a'); link.download = `proswing-snapshot-${Date.now()}.png`; link.href = canvas.toDataURL('image/png'); link.click();
             };
 
             const handleStartRecording = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = 1280;
-                canvas.height = 720;
-                const ctx = canvas.getContext('2d');
-                const stream = canvas.captureStream(30); 
-                
+                const canvas = document.createElement('canvas'); canvas.width = 1280; canvas.height = 720;
+                const ctx = canvas.getContext('2d'); const stream = canvas.captureStream(30); 
                 mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'video/webm' });
                 recordedChunksRef.current = [];
-                
-                mediaRecorderRef.current.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        recordedChunksRef.current.push(event.data);
-                    }
-                };
-                
+                mediaRecorderRef.current.ondataavailable = (event) => { if (event.data.size > 0) recordedChunksRef.current.push(event.data); };
                 mediaRecorderRef.current.onstop = () => {
-                    const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.style.display = 'none';
-                    a.href = url;
-                    a.download = `proswing-analysis-${Date.now()}.webm`;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
+                    const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' }); const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.style.display = 'none'; a.href = url; a.download = `proswing-analysis-${Date.now()}.webm`;
+                    document.body.appendChild(a); a.click(); window.URL.revokeObjectURL(url);
                 };
-                
-                mediaRecorderRef.current.start();
-                setIsRecording(true);
-                
-                const draw = () => {
-                    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-                        drawCompositeFrame(ctx, canvas.width, canvas.height);
-                        requestAnimationFrame(draw);
-                    }
-                };
-                draw();
+                mediaRecorderRef.current.start(); setIsRecording(true);
+                const draw = () => { if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') { drawCompositeFrame(ctx, canvas.width, canvas.height); requestAnimationFrame(draw); } }; draw();
             };
 
-            const handleStopRecording = () => {
-                if (mediaRecorderRef.current) {
-                    mediaRecorderRef.current.stop();
-                    setIsRecording(false);
-                }
-            };
+            const handleStopRecording = () => { if (mediaRecorderRef.current) { mediaRecorderRef.current.stop(); setIsRecording(false); } };
 
             return (
-                <div className="flex h-screen w-screen overflow-hidden flex-col md:flex-row text-sm">
+                <div className="flex h-screen w-screen overflow-hidden flex-col text-sm">
                     
-                    {/* Mobile Header */}
-                    <div className="md:hidden h-14 bg-slate-900 border-b border-slate-700 flex items-center justify-between px-4 z-50 shrink-0">
+                    {/* Header with Tabs */}
+                    <div className="h-14 bg-slate-900 border-b border-slate-700 flex items-center justify-between px-4 z-50 shrink-0">
                         <div className="font-bold text-emerald-400 flex items-center gap-2">
-                             <Icons.Brain size={20}/> ProSwing
+                             <Icons.Brain size={20}/> <span className="hidden md:inline">ProSwing</span>
                         </div>
-                        <button onClick={() => setMenuOpen(!menuOpen)} className="text-white p-2">
+                        
+                        {/* Tab Switcher */}
+                        <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
+                            <button 
+                                onClick={() => setActiveTab('swing')}
+                                className={`px-4 py-1.5 rounded-md text-xs font-bold transition ${activeTab === 'swing' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                            >
+                                Swing Analysis
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('ball')}
+                                className={`px-4 py-1.5 rounded-md text-xs font-bold transition ${activeTab === 'ball' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                            >
+                                Ball Tracker
+                            </button>
+                        </div>
+
+                        <button onClick={() => setMenuOpen(!menuOpen)} className="md:hidden text-white p-2">
                             {menuOpen ? <Icons.X /> : <Icons.Menu />}
                         </button>
                     </div>
 
-                    {/* Sidebar / Drawer */}
-                    <div className={`
-                        fixed md:relative inset-0 z-40 bg-slate-900/95 md:bg-slate-900 md:border-r border-slate-700 
-                        transform transition-transform duration-300 ease-in-out md:translate-x-0
-                        ${menuOpen ? 'translate-x-0 pt-16' : '-translate-x-full pt-0'}
-                        w-full md:w-64 flex flex-col md:flex
-                    `}>
-                        <div className="hidden md:block p-4 border-b border-slate-700">
-                            <h1 className="text-xl font-bold text-emerald-400 flex items-center gap-2">
-                                <Icons.Brain /> ProSwing AI
-                            </h1>
-                        </div>
+                    {/* Content Area */}
+                    <div className="flex-1 flex overflow-hidden relative">
                         
-                        <div className="p-4 flex-1 overflow-y-auto">
-                            
-                            {/* Export Section */}
-                            <div className="mb-6">
-                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Export & Save</h3>
-                                <div className="grid grid-cols-2 gap-2">
-                                    <button onClick={handleSnapshot} 
-                                        className="p-2 rounded bg-slate-800 hover:bg-slate-700 flex flex-col items-center gap-1">
-                                        <Icons.Camera size={18} className="text-blue-400"/>
-                                        <span className="text-[10px]">Snapshot</span>
-                                    </button>
-                                    
-                                    {!isRecording ? (
-                                        <button onClick={handleStartRecording} 
-                                            className="p-2 rounded bg-slate-800 hover:bg-slate-700 flex flex-col items-center gap-1">
-                                            <Icons.Record size={18} className="text-red-500"/>
-                                            <span className="text-[10px]">Record</span>
-                                        </button>
-                                    ) : (
-                                        <button onClick={handleStopRecording} 
-                                            className="p-2 rounded bg-red-900/50 border border-red-600 animate-pulse flex flex-col items-center gap-1">
-                                            <Icons.Stop size={18} className="text-white"/>
-                                            <span className="text-[10px]">Stop Rec</span>
-                                        </button>
-                                    )}
-                                </div>
+                        {/* 1. BALL TRACKER TAB */}
+                        {activeTab === 'ball' && (
+                            <div className="w-full h-full">
+                                <BallTracker />
                             </div>
+                        )}
 
-                            {/* Pro Library Section */}
-                            <div className="mb-6">
-                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Pro Library</h3>
-                                <div className="space-y-2">
-                                    <select 
-                                        value={selectedProVideo} 
-                                        onChange={handleProSelect}
-                                        className="w-full bg-slate-800 text-xs rounded p-2 outline-none border border-slate-700"
-                                    >
-                                        {PRO_LIBRARY.map((video, idx) => (
-                                            <option key={idx} value={video.url}>{video.name}</option>
-                                        ))}
-                                    </select>
-                                    <p className="text-[10px] text-slate-500">Select a pro swing to load instantly.</p>
-                                </div>
-                            </div>
+                        {/* 2. SWING ANALYSIS TAB */}
+                        {activeTab === 'swing' && (
+                            <div className="flex w-full h-full flex-col md:flex-row">
+                                {/* Sidebar / Drawer */}
+                                <div className={`
+                                    fixed md:relative inset-0 z-40 bg-slate-900/95 md:bg-slate-900 md:border-r border-slate-700 
+                                    transform transition-transform duration-300 ease-in-out md:translate-x-0
+                                    ${menuOpen ? 'translate-x-0 pt-16' : '-translate-x-full pt-0'}
+                                    w-full md:w-64 flex flex-col md:flex
+                                `}>
+                                    <div className="p-4 flex-1 overflow-y-auto">
+                                        <div className="mb-6">
+                                            <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Export & Save</h3>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <button onClick={handleSnapshot} className="p-2 rounded bg-slate-800 hover:bg-slate-700 flex flex-col items-center gap-1"><Icons.Camera size={18} className="text-blue-400"/><span className="text-[10px]">Snapshot</span></button>
+                                                {!isRecording ? (
+                                                    <button onClick={handleStartRecording} className="p-2 rounded bg-slate-800 hover:bg-slate-700 flex flex-col items-center gap-1"><Icons.Record size={18} className="text-red-500"/><span className="text-[10px]">Record</span></button>
+                                                ) : (
+                                                    <button onClick={handleStopRecording} className="p-2 rounded bg-red-900/50 border border-red-600 animate-pulse flex flex-col items-center gap-1"><Icons.Stop size={18} className="text-white"/><span className="text-[10px]">Stop Rec</span></button>
+                                                )}
+                                            </div>
+                                        </div>
 
-                            <div className="mb-6">
-                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Analysis Tools</h3>
-                                <div className="grid grid-cols-2 gap-2 mb-2">
-                                    <button onClick={() => { setAiEnabled(!aiEnabled); setMenuOpen(false); }}
-                                        className={`p-3 md:p-2 rounded flex justify-center items-center gap-2 ${aiEnabled ? 'bg-purple-600 animate-pulse' : 'bg-slate-800 hover:bg-slate-700'}`} title="Toggle AI Skeleton">
-                                        <Icons.Brain /> <span className="text-xs">Skeleton</span>
-                                    </button>
-                                    <button onClick={() => { setMode(mode === 'single' ? 'compare' : 'single'); setMenuOpen(false); }}
-                                        className={`p-3 md:p-2 rounded flex justify-center items-center gap-2 ${mode === 'compare' ? 'bg-blue-600' : 'bg-slate-800 hover:bg-slate-700'}`} title="Compare Mode">
-                                        <Icons.Split /> <span className="text-xs">Compare</span>
-                                    </button>
-                                </div>
-                                
-                                <div className="space-y-1">
-                                     <button onClick={() => setPathTrace(!pathTrace)} 
-                                        className={`w-full flex items-center gap-2 p-2 rounded text-xs ${pathTrace ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}>
-                                        <Icons.Activity size={14}/> Trace Hand Path
-                                    </button>
-                                    
-                                    {mode === 'compare' && (
-                                        <div className="bg-slate-800 rounded p-2">
-                                            <button onClick={() => setGhostMode(!ghostMode)} 
-                                                className={`w-full flex items-center gap-2 rounded text-xs mb-2 ${ghostMode ? 'text-purple-300 font-bold' : 'text-slate-400'}`}>
-                                                <Icons.Ghost size={14}/> Ghost Overlay
-                                            </button>
-                                            
-                                            {ghostMode && (
-                                                <div className="px-1">
-                                                    <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                                                        <span>Size</span>
-                                                        <span>{Math.round(ghostScale * 100)}%</span>
+                                        <div className="mb-6">
+                                            <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Pro Library</h3>
+                                            <div className="space-y-2">
+                                                <select value={selectedProVideo} onChange={handleProSelect} className="w-full bg-slate-800 text-xs rounded p-2 outline-none border border-slate-700">
+                                                    {PRO_LIBRARY.map((video, idx) => (
+                                                        <option key={idx} value={video.url}>{video.name}</option>
+                                                    ))}
+                                                </select>
+                                                <p className="text-[10px] text-slate-500">Select a pro swing to load instantly.</p>
+                                            </div>
+                                        </div>
+
+                                        <div className="mb-6">
+                                            <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Analysis Tools</h3>
+                                            <div className="grid grid-cols-2 gap-2 mb-2">
+                                                <button onClick={() => { setAiEnabled(!aiEnabled); setMenuOpen(false); }} className={`p-3 md:p-2 rounded flex justify-center items-center gap-2 ${aiEnabled ? 'bg-purple-600 animate-pulse' : 'bg-slate-800 hover:bg-slate-700'}`} title="Toggle AI Skeleton"><Icons.Brain /> <span className="text-xs">Skeleton</span></button>
+                                                <button onClick={() => { setMode(mode === 'single' ? 'compare' : 'single'); setMenuOpen(false); }} className={`p-3 md:p-2 rounded flex justify-center items-center gap-2 ${mode === 'compare' ? 'bg-blue-600' : 'bg-slate-800 hover:bg-slate-700'}`} title="Compare Mode"><Icons.Split /> <span className="text-xs">Compare</span></button>
+                                            </div>
+                                            <div className="space-y-1">
+                                                <button onClick={() => setPathTrace(!pathTrace)} className={`w-full flex items-center gap-2 p-2 rounded text-xs ${pathTrace ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}><Icons.Activity size={14}/> Trace Hand Path</button>
+                                                {mode === 'compare' && (
+                                                    <div className="bg-slate-800 rounded p-2">
+                                                        <button onClick={() => setGhostMode(!ghostMode)} className={`w-full flex items-center gap-2 rounded text-xs mb-2 ${ghostMode ? 'text-purple-300 font-bold' : 'text-slate-400'}`}><Icons.Ghost size={14}/> Ghost Overlay</button>
+                                                        {ghostMode && (
+                                                            <div className="px-1">
+                                                                <div className="flex justify-between text-[10px] text-slate-400 mb-1"><span>Size</span><span>{Math.round(ghostScale * 100)}%</span></div>
+                                                                <input type="range" min="0.5" max="1.5" step="0.05" value={ghostScale} onChange={(e) => setGhostScale(parseFloat(e.target.value))} className="w-full h-1 bg-slate-600 rounded-lg appearance-none cursor-pointer" />
+                                                            </div>
+                                                        )}
                                                     </div>
-                                                    <input 
-                                                        type="range" 
-                                                        min="0.5" 
-                                                        max="1.5" 
-                                                        step="0.05" 
-                                                        value={ghostScale} 
-                                                        onChange={(e) => setGhostScale(parseFloat(e.target.value))}
-                                                        className="w-full h-1 bg-slate-600 rounded-lg appearance-none cursor-pointer"
-                                                    />
+                                                )}
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="mb-6">
+                                            <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">AI Settings</h3>
+                                            <div className="flex items-center justify-between bg-slate-800 p-2 rounded">
+                                                <span className="text-xs flex gap-2 items-center"><Icons.Cpu size={14}/> Model</span>
+                                                <select value={modelType} onChange={(e) => setModelType(e.target.value)} className="bg-slate-700 text-xs rounded p-1 outline-none">
+                                                    <option value="Lightning">Lightning (Fast)</option>
+                                                    <option value="Thunder">Thunder (Accurate)</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        
+                                        {mode === 'compare' && (
+                                            <div className="mb-6">
+                                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Sync Controls</h3>
+                                                <button onClick={() => { setIsLinked(!isLinked); if(!isLinked) { setV1Playing(false); setV2Playing(false); } setMenuOpen(false); }} className={`w-full p-3 md:p-2 rounded flex items-center justify-center gap-2 font-bold transition ${isLinked ? 'bg-emerald-600' : 'bg-slate-700 hover:bg-slate-600'}`}>
+                                                    {isLinked ? <><Icons.Link size={16}/> Linked</> : <><Icons.Unlink size={16}/> Unlinked</>}
+                                                </button>
+                                                <button onClick={startAutoSync} disabled={isAutoSyncing} className={`mt-2 w-full p-3 md:p-2 rounded flex items-center justify-center gap-2 font-bold transition ${isAutoSyncing ? 'bg-yellow-600 animate-pulse' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                                                    <Icons.Wand size={16}/> {isAutoSyncing ? 'Scanning...' : 'Auto-Sync Swings'}
+                                                </button>
+                                                {isAutoSyncing && <p className="text-[10px] text-yellow-400 mt-1 text-center">Playing videos...</p>}
+                                            </div>
+                                        )}
+
+                                        <div className="mb-6">
+                                            <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Live Metrics</h3>
+                                            {video1 && stats.v1.spineAngle ? (
+                                                <div className="space-y-2 text-xs">
+                                                    <div className="flex justify-between bg-slate-800 p-2 rounded"><span>Spine Angle</span><span className="font-mono text-emerald-400">{stats.v1.spineAngle}°</span></div>
+                                                    <div className="flex justify-between bg-slate-800 p-2 rounded"><span>Shoulder Tilt</span><span className="font-mono text-emerald-400">{stats.v1.shoulderTilt}°</span></div>
                                                 </div>
+                                            ) : (
+                                                <div className="text-slate-600 italic">Play video to see metrics</div>
                                             )}
                                         </div>
-                                    )}
-                                </div>
-                            </div>
-                            
-                            <div className="mb-6">
-                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">AI Settings</h3>
-                                <div className="flex items-center justify-between bg-slate-800 p-2 rounded">
-                                    <span className="text-xs flex gap-2 items-center"><Icons.Cpu size={14}/> Model</span>
-                                    <select 
-                                        value={modelType} 
-                                        onChange={(e) => setModelType(e.target.value)}
-                                        className="bg-slate-700 text-xs rounded p-1 outline-none"
-                                    >
-                                        <option value="Lightning">Lightning (Fast)</option>
-                                        <option value="Thunder">Thunder (Accurate)</option>
-                                    </select>
-                                </div>
-                            </div>
-                            
-                            {mode === 'compare' && (
-                                <div className="mb-6">
-                                     <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Sync Controls</h3>
-                                    <button 
-                                        onClick={() => {
-                                            setIsLinked(!isLinked);
-                                            if(!isLinked) { setV1Playing(false); setV2Playing(false); }
-                                            setMenuOpen(false);
-                                        }}
-                                        className={`w-full p-3 md:p-2 rounded flex items-center justify-center gap-2 font-bold transition ${isLinked ? 'bg-emerald-600' : 'bg-slate-700 hover:bg-slate-600'}`}
-                                    >
-                                        {isLinked ? <><Icons.Link size={16}/> Linked</> : <><Icons.Unlink size={16}/> Unlinked</>}
-                                    </button>
-                                    
-                                    {/* Auto-Sync Button */}
-                                    <button 
-                                        onClick={startAutoSync}
-                                        disabled={isAutoSyncing}
-                                        className={`mt-2 w-full p-3 md:p-2 rounded flex items-center justify-center gap-2 font-bold transition ${isAutoSyncing ? 'bg-yellow-600 animate-pulse' : 'bg-indigo-600 hover:bg-indigo-700'}`}
-                                    >
-                                        <Icons.Wand size={16}/> {isAutoSyncing ? 'Scanning...' : 'Auto-Sync Swings'}
-                                    </button>
-                                    {isAutoSyncing && <p className="text-[10px] text-yellow-400 mt-1 text-center">Playing videos to find top of backswing...</p>}
-                                </div>
-                            )}
-
-                            <div className="mb-6">
-                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Live Metrics</h3>
-                                {video1 && stats.v1.spineAngle ? (
-                                    <div className="space-y-2 text-xs">
-                                        <div className="flex justify-between bg-slate-800 p-2 rounded">
-                                            <span>Spine Angle</span>
-                                            <span className="font-mono text-emerald-400">{stats.v1.spineAngle}°</span>
-                                        </div>
-                                        <div className="flex justify-between bg-slate-800 p-2 rounded">
-                                            <span>Shoulder Tilt</span>
-                                            <span className="font-mono text-emerald-400">{stats.v1.shoulderTilt}°</span>
-                                        </div>
                                     </div>
-                                ) : (
-                                    <div className="text-slate-600 italic">Play video to see metrics</div>
-                                )}
-                            </div>
-                        </div>
 
-                        <div className="p-4 border-t border-slate-700 space-y-2 shrink-0">
-                             <label className="flex items-center gap-2 justify-center w-full bg-emerald-600 hover:bg-emerald-700 text-white p-3 md:p-2 rounded cursor-pointer transition">
-                                <Icons.Upload />
-                                <span>Upload Your Swing</span>
-                                <input type="file" accept="video/*" className="hidden" onChange={(e) => handleUpload(e, 1)} />
-                            </label>
-                            
-                            <label className="flex items-center gap-2 justify-center w-full bg-purple-600 hover:bg-purple-700 text-white p-3 md:p-2 rounded cursor-pointer transition">
-                                <Icons.Upload />
-                                <span>Ref Video (Pro)</span>
-                                <input type="file" accept="video/*" className="hidden" onChange={(e) => handleUpload(e, 2)} />
-                            </label>
-                        </div>
-                    </div>
-
-                    {/* Main Stage */}
-                    <div className="flex-1 flex flex-col bg-slate-950 relative overflow-hidden">
-                        
-                        <div className={`flex-1 flex ${mode === 'compare' ? 'flex-col md:flex-row' : 'flex-col'} relative`}>
-                            
-                            {/* Player 1 Viewport */}
-                            <div className={`flex flex-col relative ${mode === 'compare' ? 'h-1/2 md:h-full md:w-1/2 border-b md:border-b-0 md:border-r border-slate-700' : 'w-full h-full'}`}>
-                                <div className="flex-1 relative bg-black min-h-0">
-                                    <VideoAnalyzer 
-                                        id="v1" 
-                                        src={video1} 
-                                        isPlaying={v1Playing} 
-                                        playbackRate={v1Rate}
-                                        aiEnabled={aiEnabled}
-                                        onStatsUpdate={updateStats}
-                                        seekTime={v1Seek}
-                                        onTimeUpdateCallback={(t, d) => { setV1Time(t); setV1Duration(d); }}
-                                        posesRef={posesRef}
-                                        ghostMode={ghostMode}
-                                        ghostScale={ghostScale}
-                                        pathTrace={pathTrace}
-                                        modelType={modelType}
-                                        onPoseDetected={(k, t) => handlePoseDetected('v1', k, t)}
-                                    />
-                                    <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold pointer-events-none">My Swing</div>
-                                </div>
-                                <ControlsBar 
-                                    label="My Swing"
-                                    isPlaying={v1Playing} 
-                                    onPlayToggle={() => {
-                                        if(isLinked) toggleLinkedPlay();
-                                        else setV1Playing(!v1Playing);
-                                    }}
-                                    currentTime={v1Time} 
-                                    duration={v1Duration} 
-                                    onSeek={(t) => { setV1Seek(t); setV1Time(t); }}
-                                    playbackRate={v1Rate}
-                                    onRateChange={setV1Rate}
-                                />
-                            </div>
-
-                            {/* Player 2 Viewport */}
-                            {mode === 'compare' && (
-                                <div className="flex flex-col relative h-1/2 md:h-full md:w-1/2">
-                                    <div className="flex-1 relative bg-black min-h-0">
-                                        <VideoAnalyzer 
-                                            id="v2" 
-                                            src={video2} 
-                                            isPlaying={v2Playing} 
-                                            playbackRate={v2Rate}
-                                            aiEnabled={aiEnabled} 
-                                            onStatsUpdate={updateStats}
-                                            seekTime={v2Seek} 
-                                            onTimeUpdateCallback={(t, d) => { setV2Time(t); setV2Duration(d); }}
-                                            posesRef={posesRef}
-                                            ghostMode={ghostMode}
-                                            ghostScale={ghostScale}
-                                            pathTrace={pathTrace}
-                                            modelType={modelType}
-                                            onPoseDetected={(k, t) => handlePoseDetected('v2', k, t)}
-                                        />
-                                        <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold text-purple-300 pointer-events-none">Ref / Pro</div>
+                                    <div className="p-4 border-t border-slate-700 space-y-2 shrink-0">
+                                        <label className="flex items-center gap-2 justify-center w-full bg-emerald-600 hover:bg-emerald-700 text-white p-3 md:p-2 rounded cursor-pointer transition">
+                                            <Icons.Upload /> <span>Upload Your Swing</span>
+                                            <input type="file" accept="video/*" className="hidden" onChange={(e) => handleUploadSwing(e, 1)} />
+                                        </label>
+                                        <label className="flex items-center gap-2 justify-center w-full bg-purple-600 hover:bg-purple-700 text-white p-3 md:p-2 rounded cursor-pointer transition">
+                                            <Icons.Upload /> <span>Ref Video (Pro)</span>
+                                            <input type="file" accept="video/*" className="hidden" onChange={(e) => handleUploadSwing(e, 2)} />
+                                        </label>
                                     </div>
-                                    <ControlsBar 
-                                        label="Ref Swing"
-                                        isPlaying={v2Playing} 
-                                        onPlayToggle={() => {
-                                            if(isLinked) toggleLinkedPlay();
-                                            else setV2Playing(!v2Playing);
-                                        }}
-                                        currentTime={v2Time} 
-                                        duration={v2Duration} 
-                                        onSeek={(t) => { 
-                                            // Sync V2 seek to V1 + Offset if linked
-                                            if(isLinked) {
-                                                const targetTime = t + syncOffset;
-                                                setV2Seek(targetTime);
-                                            } else {
-                                                setV2Seek(t);
-                                            }
-                                            setV2Time(t); 
-                                        }}
-                                        playbackRate={v2Rate}
-                                        onRateChange={setV2Rate}
-                                    />
                                 </div>
-                            )}
-                        </div>
+
+                                {/* Video Area */}
+                                <div className="flex-1 flex flex-col bg-slate-950 relative overflow-hidden">
+                                    <div className={`flex-1 flex ${mode === 'compare' ? 'flex-col md:flex-row' : 'flex-col'} relative`}>
+                                        {/* Video 1 */}
+                                        <div className={`flex flex-col relative ${mode === 'compare' ? 'h-1/2 md:h-full md:w-1/2 border-b md:border-b-0 md:border-r border-slate-700' : 'w-full h-full'}`}>
+                                            <div className="flex-1 relative bg-black min-h-0">
+                                                <VideoAnalyzer 
+                                                    id="v1" src={video1} isPlaying={v1Playing} playbackRate={v1Rate}
+                                                    aiEnabled={aiEnabled} onStatsUpdate={updateStats}
+                                                    seekTime={v1Seek} onTimeUpdateCallback={(t, d) => { setV1Time(t); setV1Duration(d); }}
+                                                    posesRef={posesRef} ghostMode={ghostMode} ghostScale={ghostScale} pathTrace={pathTrace} modelType={modelType}
+                                                    onPoseDetected={(k, t) => handlePoseDetected('v1', k, t)}
+                                                />
+                                                <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold pointer-events-none">My Swing</div>
+                                            </div>
+                                            <ControlsBar label="My Swing" isPlaying={v1Playing} onPlayToggle={() => { if(isLinked) toggleLinkedPlay(); else setV1Playing(!v1Playing); }} currentTime={v1Time} duration={v1Duration} onSeek={(t) => { setV1Seek(t); setV1Time(t); }} playbackRate={v1Rate} onRateChange={setV1Rate} />
+                                        </div>
+
+                                        {/* Video 2 (Compare) */}
+                                        {mode === 'compare' && (
+                                            <div className="flex flex-col relative h-1/2 md:h-full md:w-1/2">
+                                                <div className="flex-1 relative bg-black min-h-0">
+                                                    <VideoAnalyzer 
+                                                        id="v2" src={video2} isPlaying={v2Playing} playbackRate={v2Rate}
+                                                        aiEnabled={aiEnabled} onStatsUpdate={updateStats}
+                                                        seekTime={v2Seek} onTimeUpdateCallback={(t, d) => { setV2Time(t); setV2Duration(d); }}
+                                                        posesRef={posesRef} ghostMode={ghostMode} ghostScale={ghostScale} pathTrace={pathTrace} modelType={modelType}
+                                                        onPoseDetected={(k, t) => handlePoseDetected('v2', k, t)}
+                                                    />
+                                                    <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold text-purple-300 pointer-events-none">Ref / Pro</div>
+                                                </div>
+                                                <ControlsBar label="Ref Swing" isPlaying={v2Playing} onPlayToggle={() => { if(isLinked) toggleLinkedPlay(); else setV2Playing(!v2Playing); }} currentTime={v2Time} duration={v2Duration} onSeek={(t) => { if(isLinked) { setV2Seek(t + syncOffset); } else { setV2Seek(t); } setV2Time(t); }} playbackRate={v2Rate} onRateChange={setV2Rate} />
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             );
