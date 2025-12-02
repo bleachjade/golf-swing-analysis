@@ -50,7 +50,7 @@
             },
             { 
                 name: "Rory McIlroy (Driver - Demo Placeholder)", 
-                url: "https://res.cloudinary.com/dtwgigsce/video/upload/v1764641979/golf_swing_analysis/Rory_McIlroy_Driver_Swing_Explained_f6imdk.mp4" 
+                url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" 
             }
         ];
 
@@ -96,7 +96,10 @@
             Activity: () => <LucideIcon name="Activity" />,
             Video: () => <LucideIcon name="Video" />,
             Cpu: () => <LucideIcon name="Cpu" />,
-            Scale: () => <LucideIcon name="Scaling" />
+            Scale: () => <LucideIcon name="Scaling" />,
+            Camera: () => <LucideIcon name="Camera" />,
+            Record: () => <LucideIcon name="Disc" />,
+            Stop: () => <LucideIcon name="Square" />
         };
 
         // --- Video Analyzer Component ---
@@ -118,8 +121,6 @@
             const videoRef = useRef(null);
             const skeletonCanvasRef = useRef(null);
             const [detector, setDetector] = useState(null);
-            
-            // Path Tracing State
             const pathHistory = useRef([]);
 
             // Model Loading
@@ -226,19 +227,14 @@
                                     if (ghostMode && posesRef) {
                                         const otherId = id === 'v1' ? 'v2' : 'v1';
                                         const otherPose = posesRef.current[otherId];
-                                        
                                         if (otherPose) {
                                             let renderPose = otherPose;
-                                            
-                                            // Apply Ghost Scaling centered on Hips
                                             if (ghostScale && ghostScale !== 1.0) {
                                                 const hip1 = otherPose[11];
                                                 const hip2 = otherPose[12];
-                                                
                                                 if (hip1 && hip2 && hip1.score > 0.3 && hip2.score > 0.3) {
                                                     const cx = (hip1.x + hip2.x) / 2;
                                                     const cy = (hip1.y + hip2.y) / 2;
-                                                    
                                                     renderPose = otherPose.map(p => ({
                                                         ...p,
                                                         x: cx + (p.x - cx) * ghostScale,
@@ -246,7 +242,6 @@
                                                     }));
                                                 }
                                             }
-                                            
                                             drawSkeleton(ctx, renderPose, otherId === 'v2' ? '#a855f7' : '#00ffcc', 0.4);
                                         }
                                     }
@@ -349,6 +344,7 @@
                         </div>
                     )}
                     <video 
+                        id={`video-${id}`} // Added ID for Export
                         ref={videoRef}
                         src={src}
                         crossOrigin="anonymous" 
@@ -361,7 +357,11 @@
                         }}
                     ></video>
                     
-                    <canvas ref={skeletonCanvasRef} className="absolute inset-0 w-full h-full z-10" />
+                    <canvas 
+                        id={`canvas-${id}`} // Added ID for Export
+                        ref={skeletonCanvasRef} 
+                        className="absolute inset-0 w-full h-full z-10" 
+                    />
                 </div>
             );
         };
@@ -434,6 +434,11 @@
             const [pathTrace, setPathTrace] = useState(false);
             const [modelType, setModelType] = useState('Lightning'); 
             const [selectedProVideo, setSelectedProVideo] = useState(PRO_LIBRARY[0].url);
+            
+            // Export State
+            const [isRecording, setIsRecording] = useState(false);
+            const mediaRecorderRef = useRef(null);
+            const recordedChunksRef = useRef([]);
 
             const posesRef = useRef({ v1: null, v2: null });
 
@@ -471,14 +476,13 @@
                 }
             };
 
-            // NEW: Directly handle dropdown change to load video immediately
             const handleProSelect = (e) => {
                 const url = e.target.value;
                 setSelectedProVideo(url);
                 setVideo2(url);
                 setMode('compare');
                 setAiEnabled(true);
-                setV2Seek(0); // Reset time to start
+                setV2Seek(0); 
                 setMenuOpen(false);
             };
 
@@ -505,6 +509,169 @@
                 const newState = !v1Playing;
                 setV1Playing(newState);
                 setV2Playing(newState);
+            };
+
+            // --- EXPORT FUNCTIONALITY ---
+            
+            const drawCompositeFrame = (ctx, width, height) => {
+                // Clear background
+                ctx.fillStyle = '#0f172a';
+                ctx.fillRect(0, 0, width, height);
+
+                const halfWidth = width / 2;
+                
+                // Draw Video 1 & Canvas 1
+                const vid1 = document.getElementById('video-v1');
+                const can1 = document.getElementById('canvas-v1');
+                
+                if (vid1) {
+                    // Calculate 'contain' dimensions for V1
+                    const v1W = vid1.videoWidth;
+                    const v1H = vid1.videoHeight;
+                    const targetW = mode === 'compare' ? halfWidth : width;
+                    const targetH = height;
+                    const targetRatio = targetW / targetH;
+                    const v1Ratio = v1W / v1H;
+                    
+                    let drawW, drawH, startX, startY;
+                    
+                    if (v1Ratio > targetRatio) {
+                        drawW = targetW;
+                        drawH = drawW / v1Ratio;
+                        startX = 0;
+                        startY = (targetH - drawH) / 2;
+                    } else {
+                        drawH = targetH;
+                        drawW = drawH * v1Ratio;
+                        startX = (targetW - drawW) / 2;
+                        startY = 0;
+                    }
+                    
+                    // Draw video frame
+                    ctx.drawImage(vid1, 0, 0, v1W, v1H, startX, startY, drawW, drawH);
+                    
+                    // Draw canvas overlay on top with same dimensions
+                    if (can1) {
+                        ctx.drawImage(can1, 0, 0, can1.width, can1.height, startX, startY, drawW, drawH);
+                    }
+                }
+
+                // Draw Video 2 & Canvas 2
+                if (mode === 'compare') {
+                    const vid2 = document.getElementById('video-v2');
+                    const can2 = document.getElementById('canvas-v2');
+                    if (vid2) {
+                        // Calculate 'contain' dimensions for V2
+                        const v2W = vid2.videoWidth;
+                        const v2H = vid2.videoHeight;
+                        const targetW = halfWidth;
+                        const targetH = height;
+                        const targetRatio = targetW / targetH;
+                        const v2Ratio = v2W / v2H;
+                        
+                        let drawW, drawH, startX, startY;
+                        
+                        if (v2Ratio > targetRatio) {
+                            drawW = targetW;
+                            drawH = drawW / v2Ratio;
+                            startX = halfWidth;
+                            startY = (targetH - drawH) / 2;
+                        } else {
+                            drawH = targetH;
+                            drawW = drawH * v2Ratio;
+                            startX = halfWidth + (targetW - drawW) / 2;
+                            startY = 0;
+                        }
+                        
+                        // Draw video frame
+                        ctx.drawImage(vid2, 0, 0, v2W, v2H, startX, startY, drawW, drawH);
+
+                        if (can2) {
+                             ctx.drawImage(can2, 0, 0, can2.width, can2.height, startX, startY, drawW, drawH);
+                        }
+                    }
+                    
+                    // Draw Separator Line
+                    ctx.strokeStyle = '#334155';
+                    ctx.lineWidth = 4;
+                    ctx.beginPath();
+                    ctx.moveTo(halfWidth, 0);
+                    ctx.lineTo(halfWidth, height);
+                    ctx.stroke();
+                }
+
+                // Add branding/watermark
+                ctx.font = '20px sans-serif';
+                ctx.fillStyle = 'white';
+                ctx.fillText('ProSwing AI Analysis', 20, 40);
+                
+                if (stats.v1.spineAngle) {
+                    ctx.font = '16px sans-serif';
+                    ctx.fillText(`Spine: ${stats.v1.spineAngle}°`, 20, height - 30);
+                }
+            };
+
+            const handleSnapshot = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 1920;
+                canvas.height = 1080;
+                const ctx = canvas.getContext('2d');
+                
+                drawCompositeFrame(ctx, canvas.width, canvas.height);
+                
+                // Download
+                const link = document.createElement('a');
+                link.download = `proswing-snapshot-${Date.now()}.png`;
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+            };
+
+            const handleStartRecording = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 1280;
+                canvas.height = 720;
+                const ctx = canvas.getContext('2d');
+                const stream = canvas.captureStream(30); // 30 FPS
+                
+                mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'video/webm' });
+                recordedChunksRef.current = [];
+                
+                mediaRecorderRef.current.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        recordedChunksRef.current.push(event.data);
+                    }
+                };
+                
+                mediaRecorderRef.current.onstop = () => {
+                    const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = `proswing-analysis-${Date.now()}.webm`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                };
+                
+                mediaRecorderRef.current.start();
+                setIsRecording(true);
+                
+                // Start Drawing Loop for Recorder
+                const draw = () => {
+                    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                        drawCompositeFrame(ctx, canvas.width, canvas.height);
+                        requestAnimationFrame(draw);
+                    }
+                };
+                draw();
+            };
+
+            const handleStopRecording = () => {
+                if (mediaRecorderRef.current) {
+                    mediaRecorderRef.current.stop();
+                    setIsRecording(false);
+                }
             };
 
             return (
@@ -535,6 +702,32 @@
                         
                         <div className="p-4 flex-1 overflow-y-auto">
                             
+                            {/* Export Section (NEW) */}
+                            <div className="mb-6">
+                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Export & Save</h3>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button onClick={handleSnapshot} 
+                                        className="p-2 rounded bg-slate-800 hover:bg-slate-700 flex flex-col items-center gap-1">
+                                        <Icons.Camera size={18} className="text-blue-400"/>
+                                        <span className="text-[10px]">Snapshot</span>
+                                    </button>
+                                    
+                                    {!isRecording ? (
+                                        <button onClick={handleStartRecording} 
+                                            className="p-2 rounded bg-slate-800 hover:bg-slate-700 flex flex-col items-center gap-1">
+                                            <Icons.Record size={18} className="text-red-500"/>
+                                            <span className="text-[10px]">Record</span>
+                                        </button>
+                                    ) : (
+                                        <button onClick={handleStopRecording} 
+                                            className="p-2 rounded bg-red-900/50 border border-red-600 animate-pulse flex flex-col items-center gap-1">
+                                            <Icons.Stop size={18} className="text-white"/>
+                                            <span className="text-[10px]">Stop Rec</span>
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
                             {/* Pro Library Section */}
                             <div className="mb-6">
                                 <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Pro Library</h3>
