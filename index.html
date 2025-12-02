@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ProSwing AI - Golf Analyzer</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- TensorFlow.js & Pose Detection -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+    <style>
+        body { background-color: #0f172a; color: white; }
+        canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+        .drawing-layer { pointer-events: auto; }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        .video-container { position: relative; overflow: hidden; background: #000; display: flex; justify-content: center; align-items: center; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect, useMemo, useCallback } = React;
+
+        // --- Component: Safe Lucide Icon Wrapper ---
+        const LucideIcon = ({ name, size = 20, className = "" }) => {
+            const ref = useRef(null);
+
+            useEffect(() => {
+                if (!ref.current || !window.lucide) return;
+                const iconDef = window.lucide.icons[name];
+                if (iconDef) {
+                    const svg = window.lucide.createElement(iconDef);
+                    svg.setAttribute('width', size);
+                    svg.setAttribute('height', size);
+                    svg.setAttribute('stroke', 'currentColor');
+                    svg.setAttribute('stroke-width', '2');
+                    if (className) svg.setAttribute('class', className);
+                    ref.current.innerHTML = '';
+                    ref.current.appendChild(svg);
+                }
+            }, [name, size, className]);
+
+            return <span ref={ref} className="inline-flex items-center justify-center" />;
+        };
+
+        const Icons = {
+            Play: () => <LucideIcon name="Play" />,
+            Pause: () => <LucideIcon name="Pause" />,
+            SlowMo: () => <LucideIcon name="Turtle" />,
+            Upload: () => <LucideIcon name="Upload" />,
+            Line: () => <LucideIcon name="Minus" />,
+            Circle: () => <LucideIcon name="Circle" />,
+            Angle: () => <LucideIcon name="Triangle" />,
+            Trash: () => <LucideIcon name="Trash2" />,
+            Split: () => <LucideIcon name="Columns" />,
+            Single: () => <LucideIcon name="Maximize" />,
+            Brain: () => <LucideIcon name="BrainCircuit" />,
+            History: () => <LucideIcon name="History" />,
+            ChevronRight: () => <LucideIcon name="ChevronRight" />,
+            Check: () => <LucideIcon name="CheckCircle" />,
+            Link: () => <LucideIcon name="Link" />,
+            Unlink: () => <LucideIcon name="Unlink" />
+        };
+
+        // --- Video Analyzer Component (Purely for Display & AI) ---
+        const VideoAnalyzer = ({ 
+            id, 
+            src, 
+            isPlaying, 
+            playbackRate, 
+            aiEnabled, 
+            activeTool,
+            onStatsUpdate,
+            seekTime,             
+            onTimeUpdateCallback
+        }) => {
+            const videoRef = useRef(null);
+            const skeletonCanvasRef = useRef(null);
+            const drawingCanvasRef = useRef(null);
+            const [detector, setDetector] = useState(null);
+            const [annotations, setAnnotations] = useState([]);
+            const [isDrawing, setIsDrawing] = useState(false);
+            const [drawStart, setDrawStart] = useState(null);
+
+            // Initialize TFJS Model
+            useEffect(() => {
+                const loadModel = async () => {
+                    await tf.ready();
+                    const model = poseDetection.SupportedModels.MoveNet;
+                    const detectorConfig = { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING };
+                    const loadedDetector = await poseDetection.createDetector(model, detectorConfig);
+                    setDetector(loadedDetector);
+                    console.log("AI Model Loaded");
+                };
+                if(aiEnabled && !detector) loadModel();
+            }, [aiEnabled]);
+
+            // Handle Playback Speed
+            useEffect(() => {
+                if (videoRef.current) videoRef.current.playbackRate = playbackRate;
+            }, [playbackRate]);
+
+            // Handle Play/Pause
+            useEffect(() => {
+                const video = videoRef.current;
+                if (!video || !src) return; 
+
+                if (isPlaying) {
+                    const playPromise = video.play();
+                    if (playPromise !== undefined) {
+                        playPromise.catch(error => {});
+                    }
+                } else {
+                    video.pause();
+                }
+            }, [isPlaying, src]);
+
+            // Handle Seeking
+            useEffect(() => {
+                const video = videoRef.current;
+                if (video && seekTime !== null && Math.abs(video.currentTime - seekTime) > 0.05) {
+                    video.currentTime = seekTime;
+                }
+            }, [seekTime]);
+
+            // --- AI Loop ---
+            useEffect(() => {
+                let animationFrameId;
+
+                const renderLoop = async () => {
+                    if (!videoRef.current || !skeletonCanvasRef.current) return;
+                    
+                    const video = videoRef.current;
+                    const canvas = skeletonCanvasRef.current;
+                    const ctx = canvas.getContext('2d');
+
+                    if (video.readyState >= 2) {
+                        const containerW = video.offsetWidth;
+                        const containerH = video.offsetHeight;
+                        
+                        canvas.width = containerW;
+                        canvas.height = containerH;
+                        ctx.clearRect(0, 0, containerW, containerH);
+
+                        const videoW = video.videoWidth;
+                        const videoH = video.videoHeight;
+                        const videoRatio = videoW / videoH;
+                        const containerRatio = containerW / containerH;
+                        
+                        let drawW, drawH, startX, startY;
+
+                        if (containerRatio > videoRatio) {
+                            drawH = containerH;
+                            drawW = drawH * videoRatio;
+                            startX = (containerW - drawW) / 2;
+                            startY = 0;
+                        } else {
+                            drawW = containerW;
+                            drawH = drawW / videoRatio;
+                            startX = 0;
+                            startY = (containerH - drawH) / 2;
+                        }
+
+                        if (aiEnabled && detector) {
+                            try {
+                                const poses = await detector.estimatePoses(video);
+                                if (poses.length > 0) {
+                                    const rawKeypoints = poses[0].keypoints;
+                                    const screenKeypoints = rawKeypoints.map(p => ({
+                                        ...p,
+                                        x: startX + (p.x / videoW) * drawW,
+                                        y: startY + (p.y / videoH) * drawH
+                                    }));
+                                    drawSkeleton(ctx, screenKeypoints);
+                                    analyzeSwing(rawKeypoints);
+                                }
+                            } catch (e) { console.error(e); }
+                        }
+                    }
+                    animationFrameId = requestAnimationFrame(renderLoop);
+                };
+
+                renderLoop();
+                return () => cancelAnimationFrame(animationFrameId);
+            }, [detector, aiEnabled]);
+
+            // Drawing Logic
+            const drawSkeleton = (ctx, keypoints) => {
+                const color = id === 'v2' ? '#a855f7' : '#00ffcc';
+                const confidenceThreshold = 0.3;
+                keypoints.forEach(point => {
+                    if(point.score > confidenceThreshold) {
+                        ctx.beginPath();
+                        ctx.arc(point.x, point.y, 4, 0, 2 * Math.PI);
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                    }
+                });
+                const connections = [
+                    [5, 7], [7, 9], [6, 8], [8, 10], [5, 6], [5, 11], [6, 12], [11, 12], [11, 13], [13, 15], [12, 14], [14, 16]
+                ];
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                connections.forEach(([i, j]) => {
+                    const p1 = keypoints[i];
+                    const p2 = keypoints[j];
+                    if (p1.score > confidenceThreshold && p2.score > confidenceThreshold) {
+                        ctx.beginPath();
+                        ctx.moveTo(p1.x, p1.y);
+                        ctx.lineTo(p2.x, p2.y);
+                        ctx.stroke();
+                    }
+                });
+            };
+
+            const analyzeSwing = (keypoints) => {
+                const leftShoulder = keypoints[5];
+                const rightShoulder = keypoints[6];
+                const leftHip = keypoints[11];
+                const rightHip = keypoints[12];
+                const nose = keypoints[0];
+
+                if(leftShoulder.score > 0.3 && leftHip.score > 0.3) {
+                    const shoulderMid = { x: (leftShoulder.x + rightShoulder.x)/2, y: (leftShoulder.y + rightShoulder.y)/2 };
+                    const hipMid = { x: (leftHip.x + rightHip.x)/2, y: (leftHip.y + rightHip.y)/2 };
+                    const spineAngle = Math.abs(Math.atan2(hipMid.y - shoulderMid.y, hipMid.x - shoulderMid.x) * 180 / Math.PI - 90);
+                    const shoulderTilt = Math.abs(Math.atan2(rightShoulder.y - leftShoulder.y, rightShoulder.x - leftShoulder.x) * 180 / Math.PI);
+
+                    if(onStatsUpdate) {
+                        onStatsUpdate(id, {
+                            spineAngle: Math.round(spineAngle),
+                            shoulderTilt: Math.round(shoulderTilt),
+                            headStability: Math.round(nose.x)
+                        });
+                    }
+                }
+            };
+
+            // Drawing Canvas Handlers
+            useEffect(() => {
+                const canvas = drawingCanvasRef.current;
+                const video = videoRef.current;
+                if(!canvas || !video) return;
+
+                const renderDrawings = () => {
+                    if(canvas.width !== video.offsetWidth || canvas.height !== video.offsetHeight) {
+                        canvas.width = video.offsetWidth;
+                        canvas.height = video.offsetHeight;
+                    }
+                    const ctx = canvas.getContext('2d');
+                    ctx.clearRect(0,0, canvas.width, canvas.height);
+                    ctx.lineWidth = 3;
+                    ctx.strokeStyle = '#facc15'; 
+                    ctx.fillStyle = 'rgba(250, 204, 21, 0.2)';
+
+                    annotations.forEach(ann => {
+                        ctx.beginPath();
+                        if(ann.type === 'line') {
+                            ctx.moveTo(ann.start.x, ann.start.y);
+                            ctx.lineTo(ann.end.x, ann.end.y);
+                            ctx.stroke();
+                        } else if (ann.type === 'circle') {
+                            const r = Math.sqrt(Math.pow(ann.end.x - ann.start.x, 2) + Math.pow(ann.end.y - ann.start.y, 2));
+                            ctx.arc(ann.start.x, ann.start.y, r, 0, 2 * Math.PI);
+                            ctx.stroke();
+                        }
+                    });
+                };
+                
+                let anim = requestAnimationFrame(function loop(){
+                    renderDrawings();
+                    anim = requestAnimationFrame(loop);
+                });
+                return () => cancelAnimationFrame(anim);
+            }, [annotations, isDrawing, drawStart, activeTool]);
+
+
+            const handleMouseDown = (e) => {
+                if(!activeTool) return;
+                const rect = drawingCanvasRef.current.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                setDrawStart({x, y});
+                setIsDrawing(true);
+            };
+
+            const handleMouseUp = (e) => {
+                if(!isDrawing || !activeTool) return;
+                const rect = drawingCanvasRef.current.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                const newAnnotation = { type: activeTool, start: drawStart, end: {x, y}, id: Date.now() };
+                setAnnotations([...annotations, newAnnotation]);
+                setIsDrawing(false);
+                setDrawStart(null);
+            };
+
+            return (
+                <div className="video-container w-full h-full bg-black relative">
+                    {!src && (
+                        <div className="absolute inset-0 flex items-center justify-center text-slate-500">
+                            <p>{id === 'v2' ? 'Upload Reference Video' : 'Upload Your Swing'}</p>
+                        </div>
+                    )}
+                    <video 
+                        ref={videoRef}
+                        src={src}
+                        className="absolute inset-0 w-full h-full"
+                        loop
+                        playsInline
+                        muted
+                        onTimeUpdate={(e) => {
+                            // Report time to parent
+                            if(onTimeUpdateCallback) onTimeUpdateCallback(e.target.currentTime, e.target.duration);
+                        }}
+                    ></video>
+                    
+                    <canvas ref={skeletonCanvasRef} className="absolute inset-0 w-full h-full z-10" />
+                    <canvas 
+                        ref={drawingCanvasRef} 
+                        className={`absolute inset-0 w-full h-full z-20 ${activeTool ? 'cursor-crosshair' : ''}`}
+                        onMouseDown={handleMouseDown}
+                        onMouseUp={handleMouseUp}
+                    />
+
+                    {annotations.length > 0 && (
+                        <button 
+                            onClick={() => setAnnotations([])}
+                            className="absolute top-2 right-2 z-30 bg-red-600/80 p-1 rounded hover:bg-red-700"
+                        >
+                            <Icons.Trash />
+                        </button>
+                    )}
+                </div>
+            );
+        };
+
+        // --- Reusable Controls Component ---
+        const ControlsBar = ({ isPlaying, onPlayToggle, currentTime, duration, onSeek, playbackRate, onRateChange, label }) => {
+            const handleTimelineClick = (e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const percent = Math.max(0, Math.min(1, x / rect.width));
+                onSeek(percent * duration);
+            };
+
+            return (
+                <div className="flex items-center gap-4 bg-slate-900 border-t border-slate-700 p-2 h-20 w-full">
+                    <button 
+                        onClick={onPlayToggle}
+                        className="w-10 h-10 rounded-full bg-white text-slate-900 flex items-center justify-center hover:scale-105 transition flex-shrink-0"
+                    >
+                        {isPlaying ? <Icons.Pause /> : <Icons.Play />}
+                    </button>
+                    
+                    <div className="flex flex-col flex-1">
+                        <div className="flex justify-between items-center mb-1">
+                            <span className="text-[10px] uppercase font-bold text-slate-400">{label}</span>
+                            <span className="text-[10px] font-mono text-slate-400">
+                                {currentTime.toFixed(1)}s / {duration.toFixed(1)}s
+                            </span>
+                        </div>
+                        <div 
+                            className="w-full h-2 bg-slate-700 rounded relative overflow-hidden cursor-pointer group"
+                            onClick={handleTimelineClick}
+                        >
+                            <div 
+                                className={`absolute left-0 top-0 h-full transition-all duration-75 ${label.includes('Reference') ? 'bg-purple-500' : 'bg-emerald-500'}`}
+                                style={{ width: `${(currentTime / duration) * 100}%` }}
+                            ></div>
+                        </div>
+                    </div>
+
+                    <div className="flex gap-1 bg-slate-800 p-1 rounded flex-shrink-0">
+                        {[0.25, 0.5, 1.0].map(rate => (
+                            <button 
+                                key={rate}
+                                onClick={() => onRateChange(rate)}
+                                className={`px-2 py-1 text-[10px] rounded ${playbackRate === rate ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                            >
+                                {rate}x
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [mode, setMode] = useState('single'); 
+            const [video1, setVideo1] = useState(null);
+            const [video2, setVideo2] = useState(null);
+            const [aiEnabled, setAiEnabled] = useState(false);
+            const [activeTool, setActiveTool] = useState(null); 
+            const [stats, setStats] = useState({ v1: {}, v2: {} });
+            const [history, setHistory] = useState([]);
+            
+            // --- Independent Video States ---
+            // Video 1 (User)
+            const [v1Playing, setV1Playing] = useState(false);
+            const [v1Time, setV1Time] = useState(0);
+            const [v1Duration, setV1Duration] = useState(1);
+            const [v1Seek, setV1Seek] = useState(null);
+            const [v1Rate, setV1Rate] = useState(1.0);
+
+            // Video 2 (Reference)
+            const [v2Playing, setV2Playing] = useState(false);
+            const [v2Time, setV2Time] = useState(0);
+            const [v2Duration, setV2Duration] = useState(1);
+            const [v2Seek, setV2Seek] = useState(null);
+            const [v2Rate, setV2Rate] = useState(1.0);
+            
+            // Link Mode (Plays both together)
+            const [isLinked, setIsLinked] = useState(false);
+
+            const handleUpload = (e, slot) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const url = URL.createObjectURL(file);
+                    if (slot === 1) {
+                        setVideo1(url);
+                        addToHistory(file.name);
+                    }
+                    else {
+                        setVideo2(url);
+                        setMode('compare');
+                        setAiEnabled(true);
+                    }
+                }
+            };
+
+            const addToHistory = (name) => {
+                const newEntry = { date: new Date().toLocaleDateString(), name };
+                const updated = [newEntry, ...history];
+                setHistory(updated);
+                localStorage.setItem('golfHistory', JSON.stringify(updated));
+            };
+
+            useEffect(() => {
+                const saved = localStorage.getItem('golfHistory');
+                if(saved) setHistory(JSON.parse(saved));
+            }, []);
+
+            const updateStats = (id, newStats) => {
+                setStats(prev => ({
+                    ...prev,
+                    [id]: newStats
+                }));
+            };
+
+            // Global Play Toggle (If Linked)
+            const toggleLinkedPlay = () => {
+                const newState = !v1Playing;
+                setV1Playing(newState);
+                setV2Playing(newState);
+            };
+
+            return (
+                <div className="flex h-screen w-screen overflow-hidden text-sm">
+                    {/* Sidebar / Profile */}
+                    <div className="w-64 bg-slate-900 border-r border-slate-700 flex flex-col">
+                        <div className="p-4 border-b border-slate-700">
+                            <h1 className="text-xl font-bold text-emerald-400 flex items-center gap-2">
+                                <Icons.Brain /> ProSwing AI
+                            </h1>
+                        </div>
+                        
+                        <div className="p-4 flex-1 overflow-y-auto">
+                            <div className="mb-6">
+                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Analysis Tools</h3>
+                                <div className="grid grid-cols-4 gap-2">
+                                    <button 
+                                        onClick={() => setActiveTool(activeTool === 'line' ? null : 'line')}
+                                        className={`p-2 rounded ${activeTool === 'line' ? 'bg-emerald-600' : 'bg-slate-800 hover:bg-slate-700'}`}
+                                        title="Draw Line"
+                                    ><Icons.Line /></button>
+                                    <button 
+                                        onClick={() => setActiveTool(activeTool === 'circle' ? null : 'circle')}
+                                        className={`p-2 rounded ${activeTool === 'circle' ? 'bg-emerald-600' : 'bg-slate-800 hover:bg-slate-700'}`}
+                                        title="Draw Circle"
+                                    ><Icons.Circle /></button>
+                                    <button 
+                                        onClick={() => setAiEnabled(!aiEnabled)}
+                                        className={`p-2 rounded ${aiEnabled ? 'bg-purple-600 animate-pulse' : 'bg-slate-800 hover:bg-slate-700'}`}
+                                        title="Toggle AI Skeleton"
+                                    ><Icons.Brain /></button>
+                                    <button 
+                                        onClick={() => setMode(mode === 'single' ? 'compare' : 'single')}
+                                        className={`p-2 rounded ${mode === 'compare' ? 'bg-blue-600' : 'bg-slate-800 hover:bg-slate-700'}`}
+                                        title="Compare Mode"
+                                    >{mode === 'single' ? <Icons.Split /> : <Icons.Single />}</button>
+                                </div>
+                            </div>
+                            
+                            {mode === 'compare' && (
+                                <div className="mb-6">
+                                     <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Sync Controls</h3>
+                                    <button 
+                                        onClick={() => {
+                                            setIsLinked(!isLinked);
+                                            if(!isLinked) { setV1Playing(false); setV2Playing(false); }
+                                        }}
+                                        className={`w-full p-2 rounded flex items-center justify-center gap-2 font-bold transition ${isLinked ? 'bg-emerald-600' : 'bg-slate-700 hover:bg-slate-600'}`}
+                                    >
+                                        {isLinked ? <><Icons.Link size={16}/> Linked</> : <><Icons.Unlink size={16}/> Unlinked</>}
+                                    </button>
+                                    <p className="text-[10px] text-slate-500 mt-2 text-center">
+                                        {isLinked ? "Videos play/pause together." : "Control videos independently."}
+                                    </p>
+                                </div>
+                            )}
+
+                            <div className="mb-6">
+                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Live Metrics</h3>
+                                {video1 && stats.v1.spineAngle ? (
+                                    <div className="space-y-2 text-xs">
+                                        <div className="flex justify-between bg-slate-800 p-2 rounded">
+                                            <span>Spine Angle</span>
+                                            <span className="font-mono text-emerald-400">{stats.v1.spineAngle}°</span>
+                                        </div>
+                                        <div className="flex justify-between bg-slate-800 p-2 rounded">
+                                            <span>Shoulder Tilt</span>
+                                            <span className="font-mono text-emerald-400">{stats.v1.shoulderTilt}°</span>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="text-slate-600 italic">Play video to see metrics</div>
+                                )}
+                            </div>
+
+                        </div>
+
+                        <div className="p-4 border-t border-slate-700 space-y-2">
+                             <label className="flex items-center gap-2 justify-center w-full bg-emerald-600 hover:bg-emerald-700 text-white p-2 rounded cursor-pointer transition">
+                                <Icons.Upload />
+                                <span>Upload Your Swing</span>
+                                <input type="file" accept="video/*" className="hidden" onChange={(e) => handleUpload(e, 1)} />
+                            </label>
+                            
+                            <label className="flex items-center gap-2 justify-center w-full bg-purple-600 hover:bg-purple-700 text-white p-2 rounded cursor-pointer transition">
+                                <Icons.Upload />
+                                <span>Upload Reference (Pro)</span>
+                                <input type="file" accept="video/*" className="hidden" onChange={(e) => handleUpload(e, 2)} />
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Main Stage */}
+                    <div className="flex-1 flex flex-col bg-slate-950 relative">
+                        {/* Video Area */}
+                        <div className={`flex-1 flex ${mode === 'compare' ? 'flex-row' : 'flex-col'} relative`}>
+                            
+                            {/* Player 1 Viewport */}
+                            <div className={`flex flex-col relative ${mode === 'compare' ? 'w-1/2 border-r border-slate-700' : 'w-full h-full'}`}>
+                                <div className="flex-1 relative bg-black">
+                                    <VideoAnalyzer 
+                                        id="v1" 
+                                        src={video1} 
+                                        isPlaying={v1Playing} 
+                                        playbackRate={v1Rate}
+                                        aiEnabled={aiEnabled}
+                                        activeTool={activeTool}
+                                        onStatsUpdate={updateStats}
+                                        seekTime={v1Seek}
+                                        onTimeUpdateCallback={(t, d) => { setV1Time(t); setV1Duration(d); }}
+                                    />
+                                    <div className="absolute top-4 left-4 bg-black/50 px-2 py-1 rounded text-white text-xs font-bold">Current Swing</div>
+                                </div>
+                                {/* Controls 1 (Always visible) */}
+                                <ControlsBar 
+                                    label="My Swing"
+                                    isPlaying={v1Playing} 
+                                    onPlayToggle={() => {
+                                        if(isLinked) toggleLinkedPlay();
+                                        else setV1Playing(!v1Playing);
+                                    }}
+                                    currentTime={v1Time} 
+                                    duration={v1Duration} 
+                                    onSeek={(t) => {
+                                        setV1Seek(t); 
+                                        setV1Time(t);
+                                    }}
+                                    playbackRate={v1Rate}
+                                    onRateChange={setV1Rate}
+                                />
+                            </div>
+
+                            {/* Player 2 Viewport (Compare Mode) */}
+                            {mode === 'compare' && (
+                                <div className="flex flex-col relative w-1/2">
+                                    <div className="flex-1 relative bg-black">
+                                        <VideoAnalyzer 
+                                            id="v2" 
+                                            src={video2} 
+                                            isPlaying={v2Playing} 
+                                            playbackRate={v2Rate}
+                                            aiEnabled={aiEnabled} 
+                                            activeTool={activeTool}
+                                            onStatsUpdate={updateStats}
+                                            seekTime={v2Seek} 
+                                            onTimeUpdateCallback={(t, d) => { setV2Time(t); setV2Duration(d); }}
+                                        />
+                                        <div className="absolute top-4 left-4 bg-black/50 px-2 py-1 rounded text-white text-xs font-bold text-purple-300">Reference / Pro</div>
+                                    </div>
+                                    {/* Controls 2 (Compare Only) */}
+                                    <ControlsBar 
+                                        label="Reference Swing"
+                                        isPlaying={v2Playing} 
+                                        onPlayToggle={() => {
+                                            if(isLinked) toggleLinkedPlay();
+                                            else setV2Playing(!v2Playing);
+                                        }}
+                                        currentTime={v2Time} 
+                                        duration={v2Duration} 
+                                        onSeek={(t) => {
+                                            setV2Seek(t); 
+                                            setV2Time(t);
+                                        }}
+                                        playbackRate={v2Rate}
+                                        onRateChange={setV2Rate}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
