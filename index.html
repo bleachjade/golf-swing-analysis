@@ -42,6 +42,18 @@
     <script type="text/babel">
         const { useState, useRef, useEffect, useMemo, useCallback } = React;
 
+        // --- Pro Library Data ---
+        const PRO_LIBRARY = [
+            { 
+                name: "Rory McIlroy (Iron)", 
+                url: "https://res.cloudinary.com/dtwgigsce/video/upload/v1764639944/golf_swing_analysis/Rory_McIlroys_Iron_Swing_The_Perfect_Blend_of_Power_Precision_Rory_McIlroy_isnt_just_one_ehae6o.mp4" 
+            },
+            { 
+                name: "Rory McIlroy (Driver - Demo Placeholder)", 
+                url: "https://res.cloudinary.com/dtwgigsce/video/upload/v1764641979/golf_swing_analysis/Rory_McIlroy_Driver_Swing_Explained_f6imdk.mp4" 
+            }
+        ];
+
         // --- Component: Safe Lucide Icon Wrapper ---
         const LucideIcon = ({ name, size = 20, className = "" }) => {
             const ref = useRef(null);
@@ -69,10 +81,7 @@
             Pause: () => <LucideIcon name="Pause" />,
             SlowMo: () => <LucideIcon name="Turtle" />,
             Upload: () => <LucideIcon name="Upload" />,
-            Line: () => <LucideIcon name="Minus" />,
-            Circle: () => <LucideIcon name="Circle" />,
             Angle: () => <LucideIcon name="Triangle" />,
-            Trash: () => <LucideIcon name="Trash2" />,
             Split: () => <LucideIcon name="Columns" />,
             Single: () => <LucideIcon name="Maximize" />,
             Brain: () => <LucideIcon name="BrainCircuit" />,
@@ -82,7 +91,12 @@
             Link: () => <LucideIcon name="Link" />,
             Unlink: () => <LucideIcon name="Unlink" />,
             Menu: () => <LucideIcon name="Menu" />,
-            X: () => <LucideIcon name="X" />
+            X: () => <LucideIcon name="X" />,
+            Ghost: () => <LucideIcon name="Ghost" />,
+            Activity: () => <LucideIcon name="Activity" />,
+            Video: () => <LucideIcon name="Video" />,
+            Cpu: () => <LucideIcon name="Cpu" />,
+            Scale: () => <LucideIcon name="Scaling" />
         };
 
         // --- Video Analyzer Component ---
@@ -92,30 +106,44 @@
             isPlaying, 
             playbackRate, 
             aiEnabled, 
-            activeTool,
             onStatsUpdate,
             seekTime,             
-            onTimeUpdateCallback
+            onTimeUpdateCallback,
+            posesRef, 
+            ghostMode,
+            ghostScale,
+            pathTrace,
+            modelType
         }) => {
             const videoRef = useRef(null);
             const skeletonCanvasRef = useRef(null);
-            const drawingCanvasRef = useRef(null);
             const [detector, setDetector] = useState(null);
-            const [annotations, setAnnotations] = useState([]);
-            const [isDrawing, setIsDrawing] = useState(false);
-            const [drawStart, setDrawStart] = useState(null);
+            
+            // Path Tracing State
+            const pathHistory = useRef([]);
 
+            // Model Loading
             useEffect(() => {
                 const loadModel = async () => {
+                    setDetector(null);
                     await tf.ready();
                     const model = poseDetection.SupportedModels.MoveNet;
-                    const detectorConfig = { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING };
+                    const type = modelType === 'Thunder' 
+                        ? poseDetection.movenet.modelType.SINGLEPOSE_THUNDER
+                        : poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING;
+                        
+                    const detectorConfig = { modelType: type };
                     const loadedDetector = await poseDetection.createDetector(model, detectorConfig);
                     setDetector(loadedDetector);
-                    console.log("AI Model Loaded");
+                    console.log(`AI Model Loaded: ${modelType}`);
                 };
-                if(aiEnabled && !detector) loadModel();
-            }, [aiEnabled]);
+                if(aiEnabled) loadModel();
+            }, [aiEnabled, modelType]);
+
+            // Clear path history on video change
+            useEffect(() => {
+                 pathHistory.current = [];
+            }, [src]);
 
             useEffect(() => {
                 if (videoRef.current) videoRef.current.playbackRate = playbackRate;
@@ -139,6 +167,7 @@
                 }
             }, [seekTime]);
 
+            // AI Render Loop
             useEffect(() => {
                 let animationFrameId;
                 const renderLoop = async () => {
@@ -148,8 +177,6 @@
                     const ctx = canvas.getContext('2d');
 
                     if (video.readyState >= 2) {
-                        // Use getBoundingClientRect for more accurate pixel mapping on mobile
-                        const rect = video.getBoundingClientRect();
                         const containerW = video.offsetWidth;
                         const containerH = video.offsetHeight;
                         
@@ -181,12 +208,53 @@
                                 const poses = await detector.estimatePoses(video);
                                 if (poses.length > 0) {
                                     const rawKeypoints = poses[0].keypoints;
+                                    
                                     const screenKeypoints = rawKeypoints.map(p => ({
                                         ...p,
                                         x: startX + (p.x / videoW) * drawW,
                                         y: startY + (p.y / videoH) * drawH
                                     }));
-                                    drawSkeleton(ctx, screenKeypoints);
+
+                                    if(posesRef) {
+                                        posesRef.current[id] = screenKeypoints;
+                                    }
+
+                                    // Draw My Skeleton
+                                    drawSkeleton(ctx, screenKeypoints, id === 'v2' ? '#a855f7' : '#00ffcc', 1.0);
+
+                                    // Draw Ghost
+                                    if (ghostMode && posesRef) {
+                                        const otherId = id === 'v1' ? 'v2' : 'v1';
+                                        const otherPose = posesRef.current[otherId];
+                                        
+                                        if (otherPose) {
+                                            let renderPose = otherPose;
+                                            
+                                            // Apply Ghost Scaling centered on Hips
+                                            if (ghostScale && ghostScale !== 1.0) {
+                                                const hip1 = otherPose[11];
+                                                const hip2 = otherPose[12];
+                                                
+                                                if (hip1 && hip2 && hip1.score > 0.3 && hip2.score > 0.3) {
+                                                    const cx = (hip1.x + hip2.x) / 2;
+                                                    const cy = (hip1.y + hip2.y) / 2;
+                                                    
+                                                    renderPose = otherPose.map(p => ({
+                                                        ...p,
+                                                        x: cx + (p.x - cx) * ghostScale,
+                                                        y: cy + (p.y - cy) * ghostScale
+                                                    }));
+                                                }
+                                            }
+                                            
+                                            drawSkeleton(ctx, renderPose, otherId === 'v2' ? '#a855f7' : '#00ffcc', 0.4);
+                                        }
+                                    }
+
+                                    if (pathTrace) {
+                                        trackPath(ctx, screenKeypoints);
+                                    }
+
                                     analyzeSwing(rawKeypoints);
                                 }
                             } catch (e) { console.error(e); }
@@ -196,11 +264,34 @@
                 };
                 renderLoop();
                 return () => cancelAnimationFrame(animationFrameId);
-            }, [detector, aiEnabled]);
+            }, [detector, aiEnabled, ghostMode, ghostScale, pathTrace]);
 
-            const drawSkeleton = (ctx, keypoints) => {
-                const color = id === 'v2' ? '#a855f7' : '#00ffcc';
+            const trackPath = (ctx, keypoints) => {
+                const leftWrist = keypoints[9];
+                const rightWrist = keypoints[10];
+
+                if (leftWrist.score > 0.3 && rightWrist.score > 0.3) {
+                    const midX = (leftWrist.x + rightWrist.x) / 2;
+                    const midY = (leftWrist.y + rightWrist.y) / 2;
+                    pathHistory.current.push({ x: midX, y: midY });
+                    if(pathHistory.current.length > 150) pathHistory.current.shift();
+                }
+
+                if (pathHistory.current.length > 1) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = '#facc15'; 
+                    ctx.lineWidth = 3;
+                    ctx.moveTo(pathHistory.current[0].x, pathHistory.current[0].y);
+                    for (let i = 1; i < pathHistory.current.length; i++) {
+                        ctx.lineTo(pathHistory.current[i].x, pathHistory.current[i].y);
+                    }
+                    ctx.stroke();
+                }
+            };
+
+            const drawSkeleton = (ctx, keypoints, color, opacity) => {
                 const confidenceThreshold = 0.3;
+                ctx.globalAlpha = opacity;
                 keypoints.forEach(point => {
                     if(point.score > confidenceThreshold) {
                         ctx.beginPath();
@@ -224,6 +315,7 @@
                         ctx.stroke();
                     }
                 });
+                ctx.globalAlpha = 1.0; 
             };
 
             const analyzeSwing = (keypoints) => {
@@ -249,72 +341,6 @@
                 }
             };
 
-            useEffect(() => {
-                const canvas = drawingCanvasRef.current;
-                const video = videoRef.current;
-                if(!canvas || !video) return;
-
-                const renderDrawings = () => {
-                    if(canvas.width !== video.offsetWidth || canvas.height !== video.offsetHeight) {
-                        canvas.width = video.offsetWidth;
-                        canvas.height = video.offsetHeight;
-                    }
-                    const ctx = canvas.getContext('2d');
-                    ctx.clearRect(0,0, canvas.width, canvas.height);
-                    ctx.lineWidth = 3;
-                    ctx.strokeStyle = '#facc15'; 
-                    ctx.fillStyle = 'rgba(250, 204, 21, 0.2)';
-
-                    annotations.forEach(ann => {
-                        ctx.beginPath();
-                        if(ann.type === 'line') {
-                            ctx.moveTo(ann.start.x, ann.start.y);
-                            ctx.lineTo(ann.end.x, ann.end.y);
-                            ctx.stroke();
-                        } else if (ann.type === 'circle') {
-                            const r = Math.sqrt(Math.pow(ann.end.x - ann.start.x, 2) + Math.pow(ann.end.y - ann.start.y, 2));
-                            ctx.arc(ann.start.x, ann.start.y, r, 0, 2 * Math.PI);
-                            ctx.stroke();
-                        }
-                    });
-                };
-                
-                let anim = requestAnimationFrame(function loop(){
-                    renderDrawings();
-                    anim = requestAnimationFrame(loop);
-                });
-                return () => cancelAnimationFrame(anim);
-            }, [annotations, isDrawing, drawStart, activeTool]);
-
-
-            const handleMouseDown = (e) => {
-                if(!activeTool) return;
-                const rect = drawingCanvasRef.current.getBoundingClientRect();
-                const clientX = e.clientX || (e.touches && e.touches[0].clientX);
-                const clientY = e.clientY || (e.touches && e.touches[0].clientY);
-                if (!clientX || !clientY) return;
-
-                const x = clientX - rect.left;
-                const y = clientY - rect.top;
-                setDrawStart({x, y});
-                setIsDrawing(true);
-            };
-
-            const handleMouseUp = (e) => {
-                if(!isDrawing || !activeTool) return;
-                const rect = drawingCanvasRef.current.getBoundingClientRect();
-                const clientX = e.clientX || (e.changedTouches && e.changedTouches[0].clientX);
-                const clientY = e.clientY || (e.changedTouches && e.changedTouches[0].clientY);
-                if (!clientX || !clientY) return;
-
-                const x = clientX - rect.left;
-                const y = clientY - rect.top;
-                const newAnnotation = { type: activeTool, start: drawStart, end: {x, y}, id: Date.now() };
-                setAnnotations([...annotations, newAnnotation]);
-                setIsDrawing(false);
-                setDrawStart(null);
-            };
-
             return (
                 <div className="video-container w-full h-full bg-black relative group">
                     {!src && (
@@ -325,6 +351,7 @@
                     <video 
                         ref={videoRef}
                         src={src}
+                        crossOrigin="anonymous" 
                         className="absolute inset-0 w-full h-full"
                         loop
                         playsInline
@@ -335,23 +362,6 @@
                     ></video>
                     
                     <canvas ref={skeletonCanvasRef} className="absolute inset-0 w-full h-full z-10" />
-                    <canvas 
-                        ref={drawingCanvasRef} 
-                        className={`absolute inset-0 w-full h-full z-20 ${activeTool ? 'cursor-crosshair' : ''}`}
-                        onMouseDown={handleMouseDown}
-                        onTouchStart={handleMouseDown}
-                        onMouseUp={handleMouseUp}
-                        onTouchEnd={handleMouseUp}
-                    />
-
-                    {annotations.length > 0 && (
-                        <button 
-                            onClick={() => setAnnotations([])}
-                            className="absolute top-2 right-2 z-30 bg-red-600/80 p-1.5 rounded hover:bg-red-700"
-                        >
-                            <Icons.Trash size={16}/>
-                        </button>
-                    )}
                 </div>
             );
         };
@@ -406,13 +416,6 @@
                             </button>
                         ))}
                     </div>
-                    {/* Mobile Speed Toggle */}
-                    <button 
-                         onClick={() => onRateChange(playbackRate === 1.0 ? 0.25 : 1.0)}
-                         className="md:hidden px-2 py-1 bg-slate-800 rounded text-[10px] text-slate-400 w-10"
-                    >
-                        {playbackRate}x
-                    </button>
                 </div>
             );
         };
@@ -422,11 +425,18 @@
             const [video1, setVideo1] = useState(null);
             const [video2, setVideo2] = useState(null);
             const [aiEnabled, setAiEnabled] = useState(false);
-            const [activeTool, setActiveTool] = useState(null); 
             const [stats, setStats] = useState({ v1: {}, v2: {} });
             const [history, setHistory] = useState([]);
             
-            // UI State
+            // New Features State
+            const [ghostMode, setGhostMode] = useState(false);
+            const [ghostScale, setGhostScale] = useState(1.0); 
+            const [pathTrace, setPathTrace] = useState(false);
+            const [modelType, setModelType] = useState('Lightning'); 
+            const [selectedProVideo, setSelectedProVideo] = useState(PRO_LIBRARY[0].url);
+
+            const posesRef = useRef({ v1: null, v2: null });
+
             const [menuOpen, setMenuOpen] = useState(false);
 
             // Independent Video States
@@ -442,7 +452,6 @@
             const [v2Seek, setV2Seek] = useState(null);
             const [v2Rate, setV2Rate] = useState(1.0);
             
-            // Set default to true so videos play together immediately upon upload
             const [isLinked, setIsLinked] = useState(true);
 
             const handleUpload = (e, slot) => {
@@ -458,9 +467,19 @@
                         setMode('compare');
                         setAiEnabled(true);
                     }
-                    // Close menu on mobile after upload
                     setMenuOpen(false);
                 }
+            };
+
+            // NEW: Directly handle dropdown change to load video immediately
+            const handleProSelect = (e) => {
+                const url = e.target.value;
+                setSelectedProVideo(url);
+                setVideo2(url);
+                setMode('compare');
+                setAiEnabled(true);
+                setV2Seek(0); // Reset time to start
+                setMenuOpen(false);
             };
 
             const addToHistory = (name) => {
@@ -515,17 +534,85 @@
                         </div>
                         
                         <div className="p-4 flex-1 overflow-y-auto">
+                            
+                            {/* Pro Library Section */}
+                            <div className="mb-6">
+                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Pro Library</h3>
+                                <div className="space-y-2">
+                                    <select 
+                                        value={selectedProVideo} 
+                                        onChange={handleProSelect}
+                                        className="w-full bg-slate-800 text-xs rounded p-2 outline-none border border-slate-700"
+                                    >
+                                        {PRO_LIBRARY.map((video, idx) => (
+                                            <option key={idx} value={video.url}>{video.name}</option>
+                                        ))}
+                                    </select>
+                                    <p className="text-[10px] text-slate-500">Select a pro swing to load instantly.</p>
+                                </div>
+                            </div>
+
                             <div className="mb-6">
                                 <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Analysis Tools</h3>
-                                <div className="grid grid-cols-4 gap-2">
-                                    <button onClick={() => { setActiveTool(activeTool === 'line' ? null : 'line'); setMenuOpen(false); }}
-                                        className={`p-3 md:p-2 rounded flex justify-center ${activeTool === 'line' ? 'bg-emerald-600' : 'bg-slate-800 hover:bg-slate-700'}`}><Icons.Line /></button>
-                                    <button onClick={() => { setActiveTool(activeTool === 'circle' ? null : 'circle'); setMenuOpen(false); }}
-                                        className={`p-3 md:p-2 rounded flex justify-center ${activeTool === 'circle' ? 'bg-emerald-600' : 'bg-slate-800 hover:bg-slate-700'}`}><Icons.Circle /></button>
+                                {/* Simplified Grid: Only 2 buttons now since drawing tools are removed */}
+                                <div className="grid grid-cols-2 gap-2 mb-2">
                                     <button onClick={() => { setAiEnabled(!aiEnabled); setMenuOpen(false); }}
-                                        className={`p-3 md:p-2 rounded flex justify-center ${aiEnabled ? 'bg-purple-600 animate-pulse' : 'bg-slate-800 hover:bg-slate-700'}`}><Icons.Brain /></button>
+                                        className={`p-3 md:p-2 rounded flex justify-center items-center gap-2 ${aiEnabled ? 'bg-purple-600 animate-pulse' : 'bg-slate-800 hover:bg-slate-700'}`} title="Toggle AI Skeleton">
+                                        <Icons.Brain /> <span className="text-xs">Skeleton</span>
+                                    </button>
                                     <button onClick={() => { setMode(mode === 'single' ? 'compare' : 'single'); setMenuOpen(false); }}
-                                        className={`p-3 md:p-2 rounded flex justify-center ${mode === 'compare' ? 'bg-blue-600' : 'bg-slate-800 hover:bg-slate-700'}`}><Icons.Split /></button>
+                                        className={`p-3 md:p-2 rounded flex justify-center items-center gap-2 ${mode === 'compare' ? 'bg-blue-600' : 'bg-slate-800 hover:bg-slate-700'}`} title="Compare Mode">
+                                        <Icons.Split /> <span className="text-xs">Compare</span>
+                                    </button>
+                                </div>
+                                
+                                <div className="space-y-1">
+                                     <button onClick={() => setPathTrace(!pathTrace)} 
+                                        className={`w-full flex items-center gap-2 p-2 rounded text-xs ${pathTrace ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}>
+                                        <Icons.Activity size={14}/> Trace Hand Path
+                                    </button>
+                                    
+                                    {mode === 'compare' && (
+                                        <div className="bg-slate-800 rounded p-2">
+                                            <button onClick={() => setGhostMode(!ghostMode)} 
+                                                className={`w-full flex items-center gap-2 rounded text-xs mb-2 ${ghostMode ? 'text-purple-300 font-bold' : 'text-slate-400'}`}>
+                                                <Icons.Ghost size={14}/> Ghost Overlay
+                                            </button>
+                                            
+                                            {ghostMode && (
+                                                <div className="px-1">
+                                                    <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                                                        <span>Size</span>
+                                                        <span>{Math.round(ghostScale * 100)}%</span>
+                                                    </div>
+                                                    <input 
+                                                        type="range" 
+                                                        min="0.5" 
+                                                        max="1.5" 
+                                                        step="0.05" 
+                                                        value={ghostScale} 
+                                                        onChange={(e) => setGhostScale(parseFloat(e.target.value))}
+                                                        className="w-full h-1 bg-slate-600 rounded-lg appearance-none cursor-pointer"
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            
+                            <div className="mb-6">
+                                <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">AI Settings</h3>
+                                <div className="flex items-center justify-between bg-slate-800 p-2 rounded">
+                                    <span className="text-xs flex gap-2 items-center"><Icons.Cpu size={14}/> Model</span>
+                                    <select 
+                                        value={modelType} 
+                                        onChange={(e) => setModelType(e.target.value)}
+                                        className="bg-slate-700 text-xs rounded p-1 outline-none"
+                                    >
+                                        <option value="Lightning">Lightning (Fast)</option>
+                                        <option value="Thunder">Thunder (Accurate)</option>
+                                    </select>
                                 </div>
                             </div>
                             
@@ -593,10 +680,14 @@
                                         isPlaying={v1Playing} 
                                         playbackRate={v1Rate}
                                         aiEnabled={aiEnabled}
-                                        activeTool={activeTool}
                                         onStatsUpdate={updateStats}
                                         seekTime={v1Seek}
                                         onTimeUpdateCallback={(t, d) => { setV1Time(t); setV1Duration(d); }}
+                                        posesRef={posesRef}
+                                        ghostMode={ghostMode}
+                                        ghostScale={ghostScale}
+                                        pathTrace={pathTrace}
+                                        modelType={modelType}
                                     />
                                     <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold pointer-events-none">My Swing</div>
                                 </div>
@@ -625,10 +716,14 @@
                                             isPlaying={v2Playing} 
                                             playbackRate={v2Rate}
                                             aiEnabled={aiEnabled} 
-                                            activeTool={activeTool}
                                             onStatsUpdate={updateStats}
                                             seekTime={v2Seek} 
                                             onTimeUpdateCallback={(t, d) => { setV2Time(t); setV2Duration(d); }}
+                                            posesRef={posesRef}
+                                            ghostMode={ghostMode}
+                                            ghostScale={ghostScale}
+                                            pathTrace={pathTrace}
+                                            modelType={modelType}
                                         />
                                         <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold text-purple-300 pointer-events-none">Ref / Pro</div>
                                     </div>
