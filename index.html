@@ -49,8 +49,9 @@
                 url: "https://res.cloudinary.com/dtwgigsce/video/upload/v1764639944/golf_swing_analysis/Rory_McIlroys_Iron_Swing_The_Perfect_Blend_of_Power_Precision_Rory_McIlroy_isnt_just_one_ehae6o.mp4" 
             },
             { 
-                name: "Rory McIlroy (Driver - Demo Placeholder)", 
-                url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" 
+                name: "Rory McIlroy (Driver)", 
+                // Short clip for faster scanning
+                url: "https://res.cloudinary.com/dtwgigsce/video/upload/v1764641979/golf_swing_analysis/Rory_McIlroy_Driver_Swing_Explained_f6imdk.mp4"
             }
         ];
 
@@ -99,7 +100,8 @@
             Scale: () => <LucideIcon name="Scaling" />,
             Camera: () => <LucideIcon name="Camera" />,
             Record: () => <LucideIcon name="Disc" />,
-            Stop: () => <LucideIcon name="Square" />
+            Stop: () => <LucideIcon name="Square" />,
+            Wand: () => <LucideIcon name="Wand2" />
         };
 
         // --- Video Analyzer Component ---
@@ -116,7 +118,8 @@
             ghostMode,
             ghostScale,
             pathTrace,
-            modelType
+            modelType,
+            onPoseDetected 
         }) => {
             const videoRef = useRef(null);
             const skeletonCanvasRef = useRef(null);
@@ -210,6 +213,11 @@
                                 if (poses.length > 0) {
                                     const rawKeypoints = poses[0].keypoints;
                                     
+                                    // Send pose data up to parent for Auto-Sync logic
+                                    if(onPoseDetected) {
+                                        onPoseDetected(rawKeypoints, video.currentTime);
+                                    }
+
                                     const screenKeypoints = rawKeypoints.map(p => ({
                                         ...p,
                                         x: startX + (p.x / videoW) * drawW,
@@ -344,7 +352,7 @@
                         </div>
                     )}
                     <video 
-                        id={`video-${id}`} // Added ID for Export
+                        id={`video-${id}`}
                         ref={videoRef}
                         src={src}
                         crossOrigin="anonymous" 
@@ -358,7 +366,7 @@
                     ></video>
                     
                     <canvas 
-                        id={`canvas-${id}`} // Added ID for Export
+                        id={`canvas-${id}`}
                         ref={skeletonCanvasRef} 
                         className="absolute inset-0 w-full h-full z-10" 
                     />
@@ -406,7 +414,7 @@
                     </div>
 
                     <div className="hidden md:flex gap-1 bg-slate-800 p-1 rounded flex-shrink-0">
-                        {[0.25, 0.5, 1.0].map(rate => (
+                        {[0.25, 0.5, 1.0, 1.5, 2.0].map(rate => (
                             <button 
                                 key={rate}
                                 onClick={() => onRateChange(rate)}
@@ -440,6 +448,11 @@
             const mediaRecorderRef = useRef(null);
             const recordedChunksRef = useRef([]);
 
+            // Auto-Sync State
+            const [isAutoSyncing, setIsAutoSyncing] = useState(false);
+            const [syncOffset, setSyncOffset] = useState(0); 
+            const swingPeaks = useRef({ v1: { time: null, val: Infinity }, v2: { time: null, val: Infinity } });
+
             const posesRef = useRef({ v1: null, v2: null });
 
             const [menuOpen, setMenuOpen] = useState(false);
@@ -466,11 +479,13 @@
                     if (slot === 1) {
                         setVideo1(url);
                         addToHistory(file.name);
+                        swingPeaks.current.v1 = { time: null, val: Infinity };
                     }
                     else {
                         setVideo2(url);
                         setMode('compare');
                         setAiEnabled(true);
+                        swingPeaks.current.v2 = { time: null, val: Infinity };
                     }
                     setMenuOpen(false);
                 }
@@ -483,6 +498,7 @@
                 setMode('compare');
                 setAiEnabled(true);
                 setV2Seek(0); 
+                swingPeaks.current.v2 = { time: null, val: Infinity };
                 setMenuOpen(false);
             };
 
@@ -511,21 +527,102 @@
                 setV2Playing(newState);
             };
 
+            // --- AUTO-SYNC LOGIC ---
+            
+            const startAutoSync = () => {
+                setIsAutoSyncing(true);
+                setSyncOffset(0);
+                
+                setV1Rate(1.5); // Reduced from 2.0x for better detection
+                setV2Rate(1.5);
+                
+                swingPeaks.current = { v1: { time: null, val: Infinity }, v2: { time: null, val: Infinity } };
+                
+                setV1Playing(true);
+                setV2Playing(true);
+                
+                setTimeout(() => {
+                    if (isAutoSyncing) {
+                        finalizeSync();
+                    }
+                }, 12000);
+            };
+
+            const finalizeSync = () => {
+                if (!isAutoSyncing) return;
+
+                setIsAutoSyncing(false);
+                setV1Playing(false);
+                setV2Playing(false);
+                setV1Rate(0.5); // Normal speed
+                setV2Rate(0.5);
+                
+                const p1 = swingPeaks.current.v1;
+                const p2 = swingPeaks.current.v2;
+                
+                if (p1.time !== null && p2.time !== null) {
+                    const offset = p1.time - p2.time;
+                    console.log("Auto-Sync Calculated Offset:", offset);
+                    setSyncOffset(offset);
+                    setV1Seek(p1.time);
+                    setV2Seek(p2.time); 
+                } else {
+                    console.warn("Could not detect swings. Peaks:", p1, p2);
+                }
+            };
+
+            // FIXED: Relaxed constraints for faster motion
+            const handlePoseDetected = (id, keypoints, timestamp) => {
+                if (!isAutoSyncing) return;
+
+                const leftWrist = keypoints[9];
+                const rightWrist = keypoints[10];
+                
+                // Lower threshold to catch blurry fast frames
+                if ((leftWrist.score < 0.2 && rightWrist.score < 0.2)) return;
+
+                // Use robust wrist finding (one might be hidden)
+                let wristY;
+                if (leftWrist.score > 0.2 && rightWrist.score > 0.2) {
+                    wristY = (leftWrist.y + rightWrist.y) / 2;
+                } else if (leftWrist.score > 0.2) {
+                    wristY = leftWrist.y;
+                } else {
+                    wristY = rightWrist.y;
+                }
+                
+                // Removed the "nose check" because sometimes head dips or is misdetected
+                // Just looking for the absolute highest point (lowest Y) usually works well for backswing top
+
+                // Track Minimum Y (Highest Point of Swing)
+                if (wristY < swingPeaks.current[id].val) {
+                    swingPeaks.current[id] = { time: timestamp, val: wristY };
+                }
+            };
+
+            useEffect(() => {
+                if (!isAutoSyncing) return;
+                const v1Done = v1Time > 10 || v1Time >= v1Duration * 0.95;
+                const v2Done = v2Time > 10 || v2Time >= v2Duration * 0.95;
+
+                if (v1Done && v2Done) {
+                    finalizeSync();
+                }
+            }, [v1Time, v2Time, v1Duration, v2Duration, isAutoSyncing]);
+
+
             // --- EXPORT FUNCTIONALITY ---
             
             const drawCompositeFrame = (ctx, width, height) => {
-                // Clear background
                 ctx.fillStyle = '#0f172a';
                 ctx.fillRect(0, 0, width, height);
 
                 const halfWidth = width / 2;
                 
-                // Draw Video 1 & Canvas 1
                 const vid1 = document.getElementById('video-v1');
                 const can1 = document.getElementById('canvas-v1');
                 
                 if (vid1) {
-                    // Calculate 'contain' dimensions for V1
                     const v1W = vid1.videoWidth;
                     const v1H = vid1.videoHeight;
                     const targetW = mode === 'compare' ? halfWidth : width;
@@ -547,21 +644,16 @@
                         startY = 0;
                     }
                     
-                    // Draw video frame
                     ctx.drawImage(vid1, 0, 0, v1W, v1H, startX, startY, drawW, drawH);
-                    
-                    // Draw canvas overlay on top with same dimensions
                     if (can1) {
                         ctx.drawImage(can1, 0, 0, can1.width, can1.height, startX, startY, drawW, drawH);
                     }
                 }
 
-                // Draw Video 2 & Canvas 2
                 if (mode === 'compare') {
                     const vid2 = document.getElementById('video-v2');
                     const can2 = document.getElementById('canvas-v2');
                     if (vid2) {
-                        // Calculate 'contain' dimensions for V2
                         const v2W = vid2.videoWidth;
                         const v2H = vid2.videoHeight;
                         const targetW = halfWidth;
@@ -583,15 +675,12 @@
                             startY = 0;
                         }
                         
-                        // Draw video frame
                         ctx.drawImage(vid2, 0, 0, v2W, v2H, startX, startY, drawW, drawH);
-
                         if (can2) {
                              ctx.drawImage(can2, 0, 0, can2.width, can2.height, startX, startY, drawW, drawH);
                         }
                     }
                     
-                    // Draw Separator Line
                     ctx.strokeStyle = '#334155';
                     ctx.lineWidth = 4;
                     ctx.beginPath();
@@ -600,7 +689,6 @@
                     ctx.stroke();
                 }
 
-                // Add branding/watermark
                 ctx.font = '20px sans-serif';
                 ctx.fillStyle = 'white';
                 ctx.fillText('ProSwing AI Analysis', 20, 40);
@@ -616,10 +704,7 @@
                 canvas.width = 1920;
                 canvas.height = 1080;
                 const ctx = canvas.getContext('2d');
-                
                 drawCompositeFrame(ctx, canvas.width, canvas.height);
-                
-                // Download
                 const link = document.createElement('a');
                 link.download = `proswing-snapshot-${Date.now()}.png`;
                 link.href = canvas.toDataURL('image/png');
@@ -631,7 +716,7 @@
                 canvas.width = 1280;
                 canvas.height = 720;
                 const ctx = canvas.getContext('2d');
-                const stream = canvas.captureStream(30); // 30 FPS
+                const stream = canvas.captureStream(30); 
                 
                 mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'video/webm' });
                 recordedChunksRef.current = [];
@@ -657,7 +742,6 @@
                 mediaRecorderRef.current.start();
                 setIsRecording(true);
                 
-                // Start Drawing Loop for Recorder
                 const draw = () => {
                     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
                         drawCompositeFrame(ctx, canvas.width, canvas.height);
@@ -702,7 +786,7 @@
                         
                         <div className="p-4 flex-1 overflow-y-auto">
                             
-                            {/* Export Section (NEW) */}
+                            {/* Export Section */}
                             <div className="mb-6">
                                 <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Export & Save</h3>
                                 <div className="grid grid-cols-2 gap-2">
@@ -747,7 +831,6 @@
 
                             <div className="mb-6">
                                 <h3 className="text-slate-400 uppercase text-xs font-bold mb-3">Analysis Tools</h3>
-                                {/* Simplified Grid: Only 2 buttons now since drawing tools are removed */}
                                 <div className="grid grid-cols-2 gap-2 mb-2">
                                     <button onClick={() => { setAiEnabled(!aiEnabled); setMenuOpen(false); }}
                                         className={`p-3 md:p-2 rounded flex justify-center items-center gap-2 ${aiEnabled ? 'bg-purple-600 animate-pulse' : 'bg-slate-800 hover:bg-slate-700'}`} title="Toggle AI Skeleton">
@@ -822,6 +905,16 @@
                                     >
                                         {isLinked ? <><Icons.Link size={16}/> Linked</> : <><Icons.Unlink size={16}/> Unlinked</>}
                                     </button>
+                                    
+                                    {/* Auto-Sync Button */}
+                                    <button 
+                                        onClick={startAutoSync}
+                                        disabled={isAutoSyncing}
+                                        className={`mt-2 w-full p-3 md:p-2 rounded flex items-center justify-center gap-2 font-bold transition ${isAutoSyncing ? 'bg-yellow-600 animate-pulse' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                    >
+                                        <Icons.Wand size={16}/> {isAutoSyncing ? 'Scanning...' : 'Auto-Sync Swings'}
+                                    </button>
+                                    {isAutoSyncing && <p className="text-[10px] text-yellow-400 mt-1 text-center">Playing videos to find top of backswing...</p>}
                                 </div>
                             )}
 
@@ -881,6 +974,7 @@
                                         ghostScale={ghostScale}
                                         pathTrace={pathTrace}
                                         modelType={modelType}
+                                        onPoseDetected={(k, t) => handlePoseDetected('v1', k, t)}
                                     />
                                     <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold pointer-events-none">My Swing</div>
                                 </div>
@@ -917,6 +1011,7 @@
                                             ghostScale={ghostScale}
                                             pathTrace={pathTrace}
                                             modelType={modelType}
+                                            onPoseDetected={(k, t) => handlePoseDetected('v2', k, t)}
                                         />
                                         <div className="absolute top-2 left-2 md:top-4 md:left-4 bg-black/50 px-2 py-1 rounded text-white text-[10px] md:text-xs font-bold text-purple-300 pointer-events-none">Ref / Pro</div>
                                     </div>
@@ -929,7 +1024,16 @@
                                         }}
                                         currentTime={v2Time} 
                                         duration={v2Duration} 
-                                        onSeek={(t) => { setV2Seek(t); setV2Time(t); }}
+                                        onSeek={(t) => { 
+                                            // Sync V2 seek to V1 + Offset if linked
+                                            if(isLinked) {
+                                                const targetTime = t + syncOffset;
+                                                setV2Seek(targetTime);
+                                            } else {
+                                                setV2Seek(t);
+                                            }
+                                            setV2Time(t); 
+                                        }}
                                         playbackRate={v2Rate}
                                         onRateChange={setV2Rate}
                                     />
